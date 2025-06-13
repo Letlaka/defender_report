@@ -1,0 +1,31 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+gpedu
+gphealth
+gpgded
+gdsd
+gpsports
+gdard
+gpt
+gpdrt
+gpegov
+gpdid
+gdhus
+gpdpr
+gpsas
+cogta
+gifa
+ungrouped
+.vscode/settings.json
+AVReport.xlsx
+DefenderAgents_Report.xlsx
+DefenderAgents.xlsx
