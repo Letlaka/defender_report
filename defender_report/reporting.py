@@ -122,7 +122,8 @@ def _write_summary_table(
 
     # 1a) Write the date header in cell A1
     date_format = workbook.add_format({"bold": True, "align": "left", "font_size": 12})
-    date_label = report_date.strftime("%-d-%b")  # e.g. "5-Jun"
+    raw_label  = report_date.strftime("%d-%b")   # e.g. "05-Jun"
+    date_label = raw_label.lstrip("0")           # -> "5-Jun"
     worksheet.write(0, 0, date_label, date_format)
 
     # 2) Write the DataFrame starting at row 2 (0-indexed row 1)
@@ -244,7 +245,8 @@ def write_full_report(
 
             # 2a) date header in row 1, merged A→last column
             report_date = datetime.date.today()
-            date_str = report_date.strftime("%-d-%b")  # e.g. "12-Jun"
+            raw = report_date.strftime("%d-%b")  # “05-Jun” on any OS
+            date_str    = raw.lstrip("0")               # “5-Jun”
             last_col = len(summary_df.columns) - 1
             hdr_fmt = workbook.add_format(
                 {
