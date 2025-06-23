@@ -2,13 +2,11 @@
 import datetime
 import logging
 import os
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import pandas as pd
 from openpyxl.utils import get_column_letter
 from tqdm import tqdm
-
-from defender_report.utils import Spinner
 
 logger = logging.getLogger(__name__)
 
@@ -20,43 +18,36 @@ def _nested_report_folder(
     Build and return a nested folder path:
       root_directory/
         department/
-          {financial_year}/        # e.g. "2024-2025"
-            Q{1–4}/                 # fiscal quarter (Apr–Jun=Q1 … Jan–Mar=Q4)
-              {MonthName}/          # e.g. "June"
-                {YYYY-MM-DD}/       # e.g. "2024-06-15"
-    Creates folders if they do not already exist.
+          {financial_year}/
+            Q{1–4}/
+              {MonthName}/
+                {YYYY-MM-DD}/
     """
     month = report_date.month
     year = report_date.year
 
-    # Calculate financial year
-    if month >= 4:
-        fy_start = year
-    else:
-        fy_start = year - 1
-    fy_end = fy_start + 1
-    financial_year = f"{fy_start}-{fy_end}"
+    # financial year
+    fy_start = year if month >= 4 else year - 1
+    financial_year = f"{fy_start}-{fy_start + 1}"
 
-    # Calculate fiscal quarter
-    if 4 <= month <= 6:
-        quarter = "Q1"
-    elif 7 <= month <= 9:
-        quarter = "Q2"
-    elif 10 <= month <= 12:
-        quarter = "Q3"
-    else:
-        quarter = "Q4"
-
-    month_name = report_date.strftime("%B")
-    date_folder = report_date.isoformat()
+    # quarter
+    quarter = (
+        "Q1"
+        if 4 <= month <= 6
+        else "Q2"
+        if 7 <= month <= 9
+        else "Q3"
+        if 10 <= month <= 12
+        else "Q4"
+    )
 
     path_parts = [
         root_directory,
         department,
         financial_year,
         quarter,
-        month_name,
-        date_folder,
+        report_date.strftime("%B"),
+        report_date.isoformat(),
     ]
     full_path = os.path.join(*path_parts)
     os.makedirs(full_path, exist_ok=True)
@@ -64,10 +55,6 @@ def _nested_report_folder(
 
 
 def _create_compliance_formats(workbook):
-    """
-    Return three XlsxWriter formats for the 80% baseline:
-      green  = '#00b050', yellow = '#ffff00', red = '#ff0000'
-    """
     green = workbook.add_format({"bg_color": "#00b050", "num_format": "0.0%"})
     yellow = workbook.add_format({"bg_color": "#ffff00", "num_format": "0.0%"})
     red = workbook.add_format({"bg_color": "#ff0000", "num_format": "0.0%"})
@@ -80,9 +67,6 @@ def _write_table(
     sheet_name: str,
     style_name: str = "Table Style Medium 16",
 ) -> None:
-    """
-    Write `dataframe` to `sheet_name` as a simple Excel table without totals.
-    """
     dataframe.to_excel(writer, sheet_name=sheet_name, index=False)
     worksheet = writer.sheets[sheet_name]
     rows, cols = dataframe.shape
@@ -104,69 +88,58 @@ def _write_summary_table(
     sheet_name: str,
     report_date: datetime.date,
 ) -> None:
-    """
-    Create a Summary sheet:
-      1) Put report_date (e.g. '5-Jun') in A1
-      2) Write `summary_dataframe` as 'Table Style Medium 16' at row 2
-         with a total row (sum for numeric, average for Compliance)
-      3) Apply 80% baseline conditional formatting on Compliance
-      4) Append a Baseline legend beneath the table
-    """
     workbook = writer.book
     green, yellow, red = _create_compliance_formats(workbook)
 
-    # 1) Create or overwrite the sheet
     worksheet = workbook.add_worksheet(sheet_name)
     writer.sheets[sheet_name] = worksheet
-    last_column_index = len(summary_dataframe.columns) - 1
+    last_col_idx = len(summary_dataframe.columns) - 1
 
-    # 1a) Write the date header in cell A1
-    date_format = workbook.add_format({"bold": True, "align": "left", "font_size": 12})
-    raw_label  = report_date.strftime("%d-%b")   # e.g. "05-Jun"
-    date_label = raw_label.lstrip("0")           # -> "5-Jun"
-    worksheet.write(0, 0, date_label, date_format)
+    # Date in A1
+    date_fmt = workbook.add_format({"bold": True, "align": "left", "font_size": 12})
+    raw = report_date.strftime("%d-%b").lstrip("0")
+    worksheet.write(0, 0, raw, date_fmt)
 
-    # 2) Write the DataFrame starting at row 2 (0-indexed row 1)
+    # DataFrame as a table with totals and conditional formatting
     start_row = 1
     summary_dataframe.to_excel(
         writer, sheet_name=sheet_name, index=False, startrow=start_row
     )
+    n_rows, n_cols = summary_dataframe.shape
 
-    # 2a) Convert that range into a Table with a total row
-    num_rows, num_cols = summary_dataframe.shape
-    table_columns = []
-    for column in summary_dataframe.columns:
-        if column == "Department":
-            table_columns.append({"header": column})
-        elif column == "Compliance":
-            table_columns.append({"header": column, "total_function": "average"})
+    # total row config
+    cols_cfg = []
+    for col in summary_dataframe.columns:
+        if col == "Department":
+            cols_cfg.append({"header": col})
+        elif col == "Compliance":
+            cols_cfg.append({"header": col, "total_function": "average"})
         else:
-            table_columns.append({"header": column, "total_function": "sum"})
+            cols_cfg.append({"header": col, "total_function": "sum"})
 
     worksheet.add_table(
         start_row,
         0,
-        start_row + num_rows,
-        num_cols - 1,
+        start_row + n_rows,
+        n_cols - 1,
         {
             "style": "Table Style Medium 16",
             "total_row": True,
-            "columns": table_columns,
+            "columns": cols_cfg,
         },
     )
 
-    # 3) Apply conditional formatting on the data rows of Compliance
-    comp_index = summary_dataframe.columns.get_loc("Compliance") + 1
-    column_letter = get_column_letter(comp_index)
-    data_row_start = start_row + 1
-    data_row_end = start_row + num_rows
-    cf_range = f"{column_letter}{data_row_start + 1}:{column_letter}{data_row_end + 1}"
-
+    # conditional formatting on “Compliance” column
+    comp_idx = summary_dataframe.columns.get_loc("Compliance") + 1
+    col_letter = get_column_letter(comp_idx)
+    data_start = start_row + 1
+    data_end = start_row + n_rows
+    rng = f"{col_letter}{data_start + 1}:{col_letter}{data_end + 1}"
     worksheet.conditional_format(
-        cf_range, {"type": "cell", "criteria": ">=", "value": 0.8, "format": green}
+        rng, {"type": "cell", "criteria": ">=", "value": 0.8, "format": green}
     )
     worksheet.conditional_format(
-        cf_range,
+        rng,
         {
             "type": "cell",
             "criteria": "between",
@@ -176,30 +149,23 @@ def _write_summary_table(
         },
     )
     worksheet.conditional_format(
-        cf_range, {"type": "cell", "criteria": "<", "value": 0.7, "format": red}
+        rng, {"type": "cell", "criteria": "<", "value": 0.7, "format": red}
     )
 
-    # 4) Add Baseline legend beneath the table
-    legend_items = [
+    # legend
+    legend = [
         ("Baseline 80%", None),
         ("> 80% (green)", "#00b050"),
         ("< 80% (yellow)", "#ffff00"),
         ("< 70% (red)", "#ff0000"),
     ]
-    legend_start_row = data_row_end + 2
-    for offset, (text, color) in enumerate(legend_items):
-        fmt_props = {"bold": True, "align": "left"}
+    row0 = data_end + 2
+    for i, (text, color) in enumerate(legend):
+        props = {"bold": True, "align": "left"}
         if color:
-            fmt_props["bg_color"] = color
-        fmt = workbook.add_format(fmt_props)
-        worksheet.merge_range(
-            legend_start_row + offset,
-            0,
-            legend_start_row + offset,
-            last_column_index,
-            text,
-            fmt,
-        )
+            props["bg_color"] = color
+        fmt = workbook.add_format(props)
+        worksheet.write(row0 + i, 0, text, fmt)
 
 
 def write_full_report(
@@ -207,147 +173,75 @@ def write_full_report(
     summary_df: pd.DataFrame,
     sheet_order: List[str],
     output_path: str,
+    include_ungrouped: bool = True,
 ) -> None:
-    import datetime
-
-    if "ungrouped" not in sheet_order:
+    # ensure “ungrouped” appears last if requested
+    if include_ungrouped and "ungrouped" not in sheet_order:
         sheet_order = sheet_order + ["ungrouped"]
 
-    with Spinner("Writing master report"):
-        with pd.ExcelWriter(
-            output_path, engine="xlsxwriter", datetime_format="yyyy-mm-dd"
-        ) as writer:
-            workbook = writer.book
+    report_date = datetime.date.today()
+    logger.info("Starting master report: %s", output_path)
 
-            # your brand-new colors
-            fmt_g = workbook.add_format({"bg_color": "#00b050", "num_format": "0.0%"})
-            fmt_y = workbook.add_format({"bg_color": "#ffff00", "num_format": "0.0%"})
-            fmt_r = workbook.add_format({"bg_color": "#ff0000", "num_format": "0.0%"})
-            style = {"style": "Table Style Medium 16"}
+    with pd.ExcelWriter(
+        output_path, engine="xlsxwriter", datetime_format="yyyy-mm-dd"
+    ) as writer:
+        wb = writer.book
 
-            # ── 1) write each department sheet exactly as before ───────
-            for dept in tqdm(sheet_order, desc="Sheets → master", unit="sheet"):
-                df_dept = all_sheets.get(dept, pd.DataFrame())
-                df_dept.to_excel(writer, sheet_name=dept, index=False)
-                ws = writer.sheets[dept]
-                rows, cols = df_dept.shape
-                ws.add_table(
-                    0,
-                    0,
-                    rows,
-                    cols - 1,
-                    {**style, "columns": [{"header": c} for c in df_dept.columns]},
-                )
-
-            # ── 2) Summary sheet ───────────────────────────────────────
-            ws_sum = workbook.add_worksheet("Summary")
-            writer.sheets["Summary"] = ws_sum
-
-            # 2a) date header in row 1, merged A→last column
-            report_date = datetime.date.today()
-            raw = report_date.strftime("%d-%b")  # “05-Jun” on any OS
-            date_str    = raw.lstrip("0")               # “5-Jun”
-            last_col = len(summary_df.columns) - 1
-            hdr_fmt = workbook.add_format(
+        # per-department sheets
+        for dept in tqdm(sheet_order, desc="Master sheets", unit="sheet"):
+            df = all_sheets.get(dept, pd.DataFrame())
+            df.to_excel(writer, sheet_name=dept, index=False)
+            ws = writer.sheets[dept]
+            r, c = df.shape
+            ws.add_table(
+                0,
+                0,
+                r,
+                c - 1,
                 {
-                    "bold": True,
-                    "align": "center",
-                    "font_size": 12,
-                    "bg_color": "#00b0f0"
-                }
-            )
-            ws_sum.merge_range(0, 0, 0, last_col, date_str, hdr_fmt)
-
-            # 2b) dump DataFrame starting at row 2 (Excel row index 1)
-            summary_df.to_excel(writer, sheet_name="Summary", index=False, startrow=1)
-            sr, sc = summary_df.shape
-
-            # 2c) add table exactly as old code, but shifted down one row
-            ws_sum.add_table(
-                1,  # header row at row=1
-                0,  # first column A
-                1
-                + sr,  # include one extra row (total row placeholder, though you don't show totals)
-                sc - 1,  # last column index
-                {
-                    **style,
-                    "columns": [{"header": c} for c in summary_df.columns],
+                    "style": "Table Style Medium 16",
+                    "columns": [{"header": h} for h in df.columns],
                 },
             )
 
-            # 2d) conditional formatting on the **data rows** of Compliance
-            comp_idx = summary_df.columns.get_loc("Compliance") + 1
-            col_letter = get_column_letter(comp_idx)
-            # data rows in Excel run from row 2 (first data) to row 1+sr
-            rng = f"{col_letter}2:{col_letter}{1 + sr}"
-            ws_sum.conditional_format(
-                rng, {"type": "cell", "criteria": ">=", "value": 0.8, "format": fmt_g}
-            )
-            ws_sum.conditional_format(
-                rng,
-                {
-                    "type": "cell",
-                    "criteria": "between",
-                    "minimum": 0.7000001,
-                    "maximum": 0.8,
-                    "format": fmt_y,
-                },
-            )
-            ws_sum.conditional_format(
-                rng, {"type": "cell", "criteria": "<=", "value": 0.7, "format": fmt_r}
-            )
+        # summary sheet
+        _write_summary_table(writer, summary_df, "Summary", report_date)
 
-            # 2e) legend under the table (two rows below last data row)
-            legend = [
-                ("Baseline 80%", None),
-                ("> 80% (green)", "#00b050"),
-                ("< 80% (yellow)", "#ffff00"),
-                ("< 70% (red)", "#ff0000"),
-            ]
-            legend_start = 1 + sr + 2
-            for i, (text, color) in enumerate(legend):
-                fmt_cfg = {"bold": True, "align": "left"}
-                if color:
-                    fmt_cfg["bg_color"] = color
-                fmt = workbook.add_format(fmt_cfg)
-                ws_sum.write(legend_start + i, 0, text, fmt)
-
-        logger.info("Master report written to %s", output_path)
-
+    logger.info("Master report written to %s", output_path)
 
 def write_department_reports(
     all_sheets: Dict[str, pd.DataFrame],
     summary_dataframe: pd.DataFrame,
     sheet_order: List[str],
     output_root: str,
-) -> None:
+    include_ungrouped: bool = True,
+) -> List[Tuple[str, str]]:
     """
     Generate one report per department in a nested folder tree,
     using the same summary‐sheet helper for identical styling.
+    Returns a list of (department_code, path_to_file).
     """
     report_date = datetime.date.today()
-    departments = list(sheet_order)
-    if "ungrouped" not in departments:
-        departments.append("ungrouped")
+    depts = list(sheet_order)
+    if include_ungrouped and "ungrouped" not in depts:
+        depts.append("ungrouped")
 
-    for department_code in tqdm(departments, desc="Writing per-dept", unit="dept"):
-        target_directory = _nested_report_folder(
-            output_root, department_code, report_date
-        )
-        file_name = f"{department_code}_Report_{report_date.isoformat()}.xlsx"
-        full_path = os.path.join(target_directory, file_name)
+    logger.info("Writing %d department reports to %s", len(depts), output_root)
 
-        with Spinner(f"Writing {department_code} report"):
-            with pd.ExcelWriter(
-                full_path, engine="xlsxwriter", datetime_format="yyyy-mm-dd"
-            ) as writer:
-                # detail sheet
-                _write_table(
-                    writer,
-                    all_sheets.get(department_code, pd.DataFrame()),
-                    department_code,
-                )
-                # identical summary sheet
-                _write_summary_table(writer, summary_dataframe, "Summary", report_date)
+    summaries: List[Tuple[str, str]] = []
+    for dept in tqdm(depts, desc="Per-dept", unit="dept"):
+        target = _nested_report_folder(output_root, dept, report_date)
+        filename = f"{dept}_Report_{report_date.isoformat()}.xlsx"
+        full_path = os.path.join(target, filename)
 
-        print(f"→ Wrote {department_code} report to {full_path}")
+        with pd.ExcelWriter(
+            full_path, engine="xlsxwriter", datetime_format="yyyy-mm-dd"
+        ) as writer:
+            _write_table(writer, all_sheets.get(dept, pd.DataFrame()), dept)
+            _write_summary_table(writer, summary_dataframe, "Summary", report_date)
+
+        # ← append inside the loop
+        summaries.append((dept, full_path))
+
+    # ← return after the loop, properly indented
+    return summaries

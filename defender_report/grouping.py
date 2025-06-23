@@ -33,7 +33,8 @@ VARIANT_TO_CODE: Dict[str, str] = {
     "gdrt": "GPDRT",
     "gp health": "GPHEALTH",
     "bgh": "GPHEALTH",
-    # …etc…
+    "EGOV": "GPEGOV",
+    "egov": "GPEGOV",
 }
 
 def extract_bracket_text(user_name: str) -> Optional[str]:

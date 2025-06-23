@@ -1,18 +1,55 @@
 import itertools
+import logging
+import os
 import sys
 import threading
 import time
-import logging
+from logging.handlers import RotatingFileHandler
+from typing import Optional
 
-def configure_logging() -> None:
+
+def configure_logging(
+    log_file_path: Optional[str] = None, level: int = logging.INFO
+) -> None:
     """
-    Configure the root logger with INFO level and a consistent timestamped format.
+    Configure root logger to:
+      • Stream to STDOUT
+      • Optionally write to a rotating file
     """
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s  %(levelname)-8s  %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    # 1) Remove any pre-existing handlers
+    root_logger = logging.getLogger()
+    for h in list(root_logger.handlers):
+        root_logger.removeHandler(h)
+
+    root_logger.setLevel(level)
+
+    # 2) Create a shared formatter
+    fmt = "%(asctime)s  %(levelname)-8s  %(message)s"
+    datefmt = "%Y-%m-%d %H:%M:%S"
+    formatter = logging.Formatter(fmt=fmt, datefmt=datefmt)
+
+    # 3) Console (CLI) handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(level)
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+
+    # 4) File handler, if requested
+    if log_file_path:
+        # ensure directory exists
+        log_dir = os.path.dirname(log_file_path)
+        if log_dir and not os.path.exists(log_dir):
+            os.makedirs(log_dir, exist_ok=True)
+
+        file_handler = RotatingFileHandler(
+            log_file_path,
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,  # keep last 5 files
+        )
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
 
 class Spinner:
     """
