@@ -29,3 +29,5 @@ ungrouped
 AVReport.xlsx
 DefenderAgents_Report.xlsx
 DefenderAgents.xlsx
+.env
+emails_config.json

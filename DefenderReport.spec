@@ -5,7 +5,7 @@ a = Analysis(
     ['defender_report\\main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('emails_config.json', '.'), ('.env', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

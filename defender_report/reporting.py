@@ -134,7 +134,7 @@ def _write_summary_table(
     col_letter = get_column_letter(comp_idx)
     data_start = start_row + 1
     data_end = start_row + n_rows
-    rng = f"{col_letter}{data_start + 1}:{col_letter}{data_end + 1}"
+    rng = f"{col_letter}{data_start}:{col_letter}{data_end}"
     worksheet.conditional_format(
         rng, {"type": "cell", "criteria": ">=", "value": 0.8, "format": green}
     )

@@ -7,13 +7,14 @@ import argparse
 import datetime
 import logging
 import os
+import pathlib
 import sys
 import shutil
 from typing import List
 
-
 import pandas as pd
 from tqdm import tqdm
+from dotenv import load_dotenv
 
 from defender_report.categorization import categorize_dataframe, tally_dataframe
 from defender_report.enrichment import enrich_all_sheets_with_ad
@@ -22,6 +23,23 @@ from defender_report.reporting import write_department_reports, write_full_repor
 from defender_report.utils import Spinner, configure_logging
 
 logger = logging.getLogger(__name__)
+
+
+def resource_path(relative_path: str) -> str:
+    """
+    Get the absolute path to a resource, whether
+    running as a script or as a PyInstaller bundle.
+    """
+    base = getattr(sys, "_MEIPASS", os.path.abspath(os.path.dirname(__file__)))
+    return os.path.join(base, relative_path)
+
+
+# Load environment variables from .env (bundled or in cwd)
+load_dotenv(resource_path(".env"))
+
+# Default mapping file – use env override or bundle one next to code
+BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
+default_map = os.getenv("EMAILS_CONFIG", resource_path("emails_config.json"))
 
 
 def parse_command_line_arguments() -> argparse.Namespace:
@@ -64,7 +82,7 @@ def parse_command_line_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--department",
-        nargs="+",  # ← allow one or more codes
+        nargs="+",
         metavar="DEPT",
         help=(
             "Optional: only generate reports for these departments "
@@ -81,6 +99,48 @@ def parse_command_line_arguments() -> argparse.Namespace:
         default=None,
         help="Optional path to write a rotating log file",
     )
+
+    # Email settings: on by default; disable with --no-emails
+    parser.add_argument(
+        "--no-emails",
+        dest="send_emails",
+        action="store_false",
+        help="Generate reports without sending emails",
+    )
+    parser.set_defaults(send_emails=True)
+
+    parser.add_argument(
+        "--emails-config",
+        default=default_map,
+        help="Path to JSON file mapping department codes to recipient email lists",
+    )
+    parser.add_argument(
+        "--smtp-server",
+        default=os.getenv("SMTP_SERVER"),
+        help="SMTP server host (env SMTP_SERVER)",
+    )
+    parser.add_argument(
+        "--smtp-port",
+        type=int,
+        default=int(os.getenv("SMTP_PORT", 587)),
+        help="SMTP server port (env SMTP_PORT)",
+    )
+    parser.add_argument(
+        "--smtp-user",
+        default=os.getenv("SMTP_USER"),
+        help="SMTP username (env SMTP_USER)",
+    )
+    parser.add_argument(
+        "--smtp-password",
+        default=os.getenv("SMTP_PASSWORD"),
+        help="SMTP password (env SMTP_PASSWORD)",
+    )
+    parser.add_argument(
+        "--from-email",
+        default=os.getenv("FROM_EMAIL"),
+        help="From address for emails (env FROM_EMAIL)",
+    )
+
     return parser.parse_args()
 
 
@@ -114,7 +174,6 @@ def main() -> None:
 
     # --- Handle --department filtering ---
     if args.department:
-        # Validate each requested code
         invalid = [
             dept
             for dept in args.department
@@ -129,7 +188,6 @@ def main() -> None:
             sys.exit(1)
 
         logger.info("Limiting report to department(s): %s", args.department)
-        # Only generate for those codes
         sheet_order = list(args.department)
 
     # --- Build per-department DataFrames & tally rows ---
@@ -163,36 +221,35 @@ def main() -> None:
             "Co-managed",
             "Intune",
             "SCCM Managed",
-            "inactive_av_clients",
             "Up to Date",
             "Out of Date",
             "Compliance",
         ]
     ]
+    summary_df.rename(columns={"Intune": "Intune Managed"}, inplace=True)
 
     # --- Map codes to display names & filter summary if needed ---
     display_map = {
-        "gpedu": "EDUCATION",
-        "gphealth": "HEALTH",
-        "gpgded": "DED",
-        "gdsd": "SocDev",
-        "gpsports": "SPORTS",
         "gdard": "AGRIC",
-        "gpt": "TREASURY",
-        "gpdrt": "TRANSPORT",
-        "gpegov": "EGOV",
-        "gpdid": "DID",
-        "gdhus": "GDHUS",
-        "gpdpr": "OOP",
-        "gpsas": "COMMSAFETY",
         "cogta": "COGTA",
+        "gpsas": "COMMSAFETY",
+        "gpgded": "DED",
+        "gpdid": "DID",
+        "gpedu": "EDUCATION",
+        "gpegov": "EGOV",
+        "gdhus": "GDHUS",
+        "gphealth": "HEALTH",
+        "gpdpr": "OOP",
+        "gdsd": "SOCDEV",
+        "gpsports": "SPORTS",
+        "gpdrt": "TRANSPORT",
+        "gpt": "TREASURY",
     }
     summary_df["Department"] = (
         summary_df["Department"].map(display_map).fillna(summary_df["Department"])
     )
 
     if args.department:
-        # Only keep rows for the requested display names
         wanted = [display_map.get(code, code) for code in args.department]
         summary_df = summary_df[summary_df["Department"].isin(wanted)]
 
@@ -212,23 +269,79 @@ def main() -> None:
         include_ungrouped=(args.department is None),
     )
 
-    dept_summaries: List[tuple[str,str]] = []
+    dept_summaries: List[tuple[str, str]] = []
     if not args.master_only:
         output_directory = os.path.dirname(args.output_path) or os.getcwd()
-        dept_summaries = write_department_reports(
-            all_sheets,
-            summary_df,
-            sheet_order,
-            output_directory,
-            include_ungrouped=(args.department is None),
-        ) or []
+        dept_summaries = (
+            write_department_reports(
+                all_sheets,
+                summary_df,
+                sheet_order,
+                output_directory,
+                include_ungrouped=(args.department is None),
+            )
+            or []
+        )
     else:
         logger.info("Skipping individual department reports (--master-only)")
+
+    # ── Email dispatch (on by default; skip if --no-emails) ─────────────────────
+    if args.send_emails:
+        # locate mapping file (first try the passed path, then bundle)
+        config_file = args.emails_config
+        if not os.path.isfile(config_file):
+            config_file = resource_path(os.path.basename(config_file))
+        if not os.path.isfile(config_file):
+            logger.error("Email mapping not found at: %s", args.emails_config)
+            sys.exit(1)
+
+        import json
+        from defender_report.emailer import send_email
+
+        with open(config_file) as f:
+            email_map = json.load(f)
+
+        for dept_code, report_path in dept_summaries:
+            recipients = email_map.get(dept_code, [])
+            if not recipients:
+                logger.warning("No recipients for '%s'; skipping email", dept_code)
+                continue
+
+            subject = (
+                f"DefenderAgents Report for {dept_code} – {reference_date.isoformat()}"
+            )
+            body = (
+                f"Hello,\n\n"
+                f"Please find attached the DefenderAgents report for department {dept_code} "
+                f"generated on {reference_date.isoformat()}.\n\n"
+                f"Regards,\nAV Team"
+            )
+
+            try:
+                send_email(
+                    smtp_server=args.smtp_server,
+                    smtp_port=args.smtp_port,
+                    smtp_user=args.smtp_user,
+                    smtp_password=args.smtp_password,
+                    from_addr=args.from_email,
+                    to_addrs=recipients,
+                    subject=subject,
+                    body=body,
+                    attachments=[report_path],
+                )
+                logger.info("Email sent to %s for '%s'", recipients, dept_code)
+            except Exception as e:
+                logger.error("Failed to send email for '%s': %s", dept_code, e)
+    else:
+        logger.info("Email sending disabled (--no-emails)")
+
     # ── print a final summary table ──────────────────────────
     try:
         from tabulate import tabulate
     except ImportError:
-        logger.warning("Install tabulate (`pip install tabulate`) to see a summary table")
+        logger.warning(
+            "Install tabulate (`pip install tabulate`) to see a summary table"
+        )
     else:
         print()  # blank line for spacing
         print("✓ Reports complete:\n")
@@ -236,21 +349,19 @@ def main() -> None:
         print(tabulate(table, headers=["Report", "Path"], tablefmt="github"))
         print()
 
-    # wait for user input before exiting
+    # wait for user input before exiting (Windows only)
     if os.name == "nt":
-        # get console width (fallback to 80 cols)
         width = shutil.get_terminal_size((80, 20)).columns
-
         msg = "✅  Reports complete  ✅"
         border = "=" * width
 
-        # print a blank line, then top border, centered message, bottom border, blank line
         print()
         print(border)
         print(msg.center(width))
         print(border)
         print()
         input("Press ENTER to close this window…")
+
 
 if __name__ == "__main__":
     main()
