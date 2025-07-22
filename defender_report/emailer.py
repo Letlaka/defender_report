@@ -1,25 +1,24 @@
-# defender_report/emailer.py
-
 import os
 import smtplib
-import json
 from email.message import EmailMessage
-from typing import List
+from typing import List, Optional
 
 
 def send_email(
     smtp_server: str,
     smtp_port: int,
-    smtp_user: str,
-    smtp_password: str,
     from_addr: str,
     to_addrs: List[str],
     subject: str,
     body: str,
-    attachments: List[str],
+    attachments: List[str] = None,
+    smtp_user: Optional[str] = None,
+    smtp_password: Optional[str] = None,
 ) -> None:
     """
     Send an email with the given attachments via an SMTP server.
+    If smtp_user and smtp_password are provided, use TLS and authenticate.
+    Otherwise, send mail anonymously (like SCCM relay).
     """
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -27,14 +26,23 @@ def send_email(
     msg["To"] = ", ".join(to_addrs)
     msg.set_content(body)
 
-    for file_path in attachments:
-        with open(file_path, "rb") as f:
-            data = f.read()
-        maintype, subtype = ("application", "octet-stream")
-        filename = os.path.basename(file_path)
-        msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
+    # Attach files if any
+    if attachments:
+        for file_path in attachments:
+            with open(file_path, "rb") as f:
+                data = f.read()
+            maintype, subtype = ("application", "octet-stream")
+            filename = os.path.basename(file_path)
+            msg.add_attachment(
+                data, maintype=maintype, subtype=subtype, filename=filename
+            )
 
+    # Connect to SMTP server
     with smtplib.SMTP(smtp_server, smtp_port) as server:
-        server.starttls()
-        server.login(smtp_user, smtp_password)
+        if smtp_user and smtp_password:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(smtp_user, smtp_password)
+        # If no auth, just send (works for whitelisted relay hosts)
         server.send_message(msg)

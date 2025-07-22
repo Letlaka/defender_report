@@ -308,27 +308,32 @@ def main() -> None:
                 continue
 
             subject = (
-                f"DefenderAgents Report for {dept_code} – {reference_date.isoformat()}"
+                f"Microsoft Defender Report for {dept_code} – {reference_date.isoformat()}"
             )
             body = (
-                f"Hello,\n\n"
-                f"Please find attached the DefenderAgents report for department {dept_code} "
+                f"Please find attached the Microsoft Defender report for department {dept_code} "
                 f"generated on {reference_date.isoformat()}.\n\n"
                 f"Regards,\nAV Team"
             )
 
             try:
-                send_email(
+                # Prepare kwargs for send_email
+                email_kwargs = dict(
                     smtp_server=args.smtp_server,
                     smtp_port=args.smtp_port,
-                    smtp_user=args.smtp_user,
-                    smtp_password=args.smtp_password,
                     from_addr=args.from_email,
                     to_addrs=recipients,
                     subject=subject,
                     body=body,
                     attachments=[report_path],
                 )
+                # Only add auth if provided
+                if getattr(args, "smtp_user", None):
+                    email_kwargs["smtp_user"] = args.smtp_user
+                if getattr(args, "smtp_password", None):
+                    email_kwargs["smtp_password"] = args.smtp_password
+
+                send_email(**email_kwargs)
                 logger.info("Email sent to %s for '%s'", recipients, dept_code)
             except Exception as e:
                 logger.error("Failed to send email for '%s': %s", dept_code, e)
