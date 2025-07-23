@@ -11,7 +11,7 @@ def send_email(
     to_addrs: List[str],
     subject: str,
     body: str,
-    attachments: List[str] = None,
+    attachments: Optional[List[str]] = None,
     smtp_user: Optional[str] = None,
     smtp_password: Optional[str] = None,
 ) -> None:
@@ -23,6 +23,9 @@ def send_email(
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = from_addr
+    # Always ensure to_addrs is a list of strings
+    if isinstance(to_addrs, str):
+        to_addrs = [to_addrs]
     msg["To"] = ", ".join(to_addrs)
     msg.set_content(body)
 
@@ -37,12 +40,15 @@ def send_email(
                 data, maintype=maintype, subtype=subtype, filename=filename
             )
 
-    # Connect to SMTP server
-    with smtplib.SMTP(smtp_server, smtp_port) as server:
-        if smtp_user and smtp_password:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(smtp_user, smtp_password)
-        # If no auth, just send (works for whitelisted relay hosts)
-        server.send_message(msg)
+    try:
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            if smtp_user and smtp_password:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                server.login(smtp_user, smtp_password)
+            server.send_message(msg)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to send email to {to_addrs} via {smtp_server}:{smtp_port}: {exc}"
+        ) from exc

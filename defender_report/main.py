@@ -17,7 +17,6 @@ from tqdm import tqdm
 from dotenv import load_dotenv
 
 from defender_report.categorization import categorize_dataframe, tally_dataframe
-from defender_report.enrichment import enrich_all_sheets_with_ad
 from defender_report.grouping import group_rows_by_department, load_sheet_order
 from defender_report.reporting import write_department_reports, write_full_report
 from defender_report.utils import Spinner, configure_logging
@@ -26,29 +25,23 @@ logger = logging.getLogger(__name__)
 
 
 def resource_path(relative_path: str) -> str:
-    """
-    Get the absolute path to a resource, whether
-    running as a script or as a PyInstaller bundle.
-    """
     base = getattr(sys, "_MEIPASS", os.path.abspath(os.path.dirname(__file__)))
     return os.path.join(base, relative_path)
 
 
-# Load environment variables from .env (bundled or in cwd)
-load_dotenv(resource_path(".env"))
+# Correct .env loading (assumes main.py in defender_report/, .env in project root)
+env_path = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"
+)
+load_dotenv(env_path)
 
-# Default mapping file – use env override or bundle one next to code
 BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
 default_map = os.getenv("EMAILS_CONFIG", resource_path("emails_config.json"))
 
 
 def parse_command_line_arguments() -> argparse.Namespace:
-    """
-    Define and parse all CLI arguments.
-    """
     today_str = datetime.date.today().isoformat()
     parser = argparse.ArgumentParser(__doc__)
-
     parser.add_argument(
         "--input-path",
         default=os.path.join(os.getcwd(), "DefenderAgents.xlsx"),
@@ -65,9 +58,7 @@ def parse_command_line_arguments() -> argparse.Namespace:
         help="Where to write the master report; default=./DefenderAgents_Report.xlsx",
     )
     parser.add_argument(
-        "--date",
-        default=today_str,
-        help="Reference date YYYY-MM-DD; default=today",
+        "--date", default=today_str, help="Reference date YYYY-MM-DD; default=today"
     )
     parser.add_argument(
         "--threshold-days",
@@ -76,18 +67,14 @@ def parse_command_line_arguments() -> argparse.Namespace:
         help="Days back considered UpToDate; default=7",
     )
     parser.add_argument(
-        "--enrich-ad",
-        action="store_true",
-        help="Enable AD enrichment via PowerShell",
+        "--enrich-ad", action="store_true", help="Enable AD enrichment via PowerShell"
     )
     parser.add_argument(
         "--department",
         nargs="+",
         metavar="DEPT",
-        help=(
-            "Optional: only generate reports for these departments "
-            "(space-separated sheet codes, e.g. 'gpegov gpsas')"
-        ),
+        help="Optional: only generate reports for these departments "
+        "(space-separated sheet codes, e.g. 'gpegov gpsas')",
     )
     parser.add_argument(
         "--master-only",
@@ -95,12 +82,8 @@ def parse_command_line_arguments() -> argparse.Namespace:
         help="Only write the master report; skip per-department workbooks",
     )
     parser.add_argument(
-        "--log-file",
-        default=None,
-        help="Optional path to write a rotating log file",
+        "--log-file", default=None, help="Optional path to write a rotating log file"
     )
-
-    # Email settings: on by default; disable with --no-emails
     parser.add_argument(
         "--no-emails",
         dest="send_emails",
@@ -108,7 +91,6 @@ def parse_command_line_arguments() -> argparse.Namespace:
         help="Generate reports without sending emails",
     )
     parser.set_defaults(send_emails=True)
-
     parser.add_argument(
         "--emails-config",
         default=default_map,
@@ -140,7 +122,6 @@ def parse_command_line_arguments() -> argparse.Namespace:
         default=os.getenv("FROM_EMAIL"),
         help="From address for emails (env FROM_EMAIL)",
     )
-
     return parser.parse_args()
 
 
@@ -172,6 +153,24 @@ def main() -> None:
     grouped_sheets = group_rows_by_department(data_frame)
     sheet_order = load_sheet_order(args.template_path)
 
+    display_map = {
+        "gdard": "AGRIC",
+        "cogta": "COGTA",
+        "gpsas": "COMMSAFETY",
+        "gpgded": "DED",
+        "gpdid": "DID",
+        "gpedu": "EDUCATION",
+        "gpegov": "EGOV",
+        "gdhus": "GDHUS",
+        "gphealth": "HEALTH",
+        "gpdpr": "OOP",
+        "gdsd": "SOCDEV",
+        "gpsports": "SPORTS",
+        "gpdrt": "TRANSPORT",
+        "gpt": "TREASURY",
+        "ungrouped": "ungrouped",
+    }
+
     # --- Handle --department filtering ---
     if args.department:
         invalid = [
@@ -186,7 +185,6 @@ def main() -> None:
                 ", ".join(sheet_order + ["ungrouped"]),
             )
             sys.exit(1)
-
         logger.info("Limiting report to department(s): %s", args.department)
         sheet_order = list(args.department)
 
@@ -227,46 +225,38 @@ def main() -> None:
         ]
     ]
     summary_df.rename(columns={"Intune": "Intune Managed"}, inplace=True)
-
-    # --- Map codes to display names & filter summary if needed ---
-    display_map = {
-        "gdard": "AGRIC",
-        "cogta": "COGTA",
-        "gpsas": "COMMSAFETY",
-        "gpgded": "DED",
-        "gpdid": "DID",
-        "gpedu": "EDUCATION",
-        "gpegov": "EGOV",
-        "gdhus": "GDHUS",
-        "gphealth": "HEALTH",
-        "gpdpr": "OOP",
-        "gdsd": "SOCDEV",
-        "gpsports": "SPORTS",
-        "gpdrt": "TRANSPORT",
-        "gpt": "TREASURY",
-    }
     summary_df["Department"] = (
         summary_df["Department"].map(display_map).fillna(summary_df["Department"])
     )
 
+    # Save a copy of all department codes (not display names)
+    master_dept_codes = list(load_sheet_order(args.template_path))
+    if "ungrouped" not in master_dept_codes:
+        master_dept_codes.append("ungrouped")
+
+    # Build filtered_* versions for per-department reports
     if args.department:
-        wanted = [display_map.get(code, code) for code in args.department]
-        summary_df = summary_df[summary_df["Department"].isin(wanted)]
-
-    # --- Optional AD enrichment ---
-    if args.enrich_ad:
-        logger.info("Enriching AD via PowerShell (this may take a few minutes)…")
-        all_sheets = enrich_all_sheets_with_ad(all_sheets)
+        filtered_sheet_order = list(args.department)
+        filtered_all_sheets = {
+            code: all_sheets[code] for code in filtered_sheet_order if code in all_sheets
+        }
+        filtered_summary_df = summary_df[
+            summary_df["Department"].isin(
+                [display_map.get(code, code) for code in filtered_sheet_order]
+            )
+        ]
     else:
-        logger.info("Skipping AD enrichment (no --enrich-ad flag)")
+        filtered_sheet_order = master_dept_codes
+        filtered_all_sheets = all_sheets
+        filtered_summary_df = summary_df
 
-    # --- Write master & per-department reports ---
+    # --- Write master report (always ALL departments) ---
     write_full_report(
         all_sheets,
         summary_df,
-        sheet_order,
+        master_dept_codes,
         args.output_path,
-        include_ungrouped=(args.department is None),
+        include_ungrouped=True,
     )
 
     dept_summaries: List[tuple[str, str]] = []
@@ -274,9 +264,9 @@ def main() -> None:
         output_directory = os.path.dirname(args.output_path) or os.getcwd()
         dept_summaries = (
             write_department_reports(
-                all_sheets,
-                summary_df,
-                sheet_order,
+                filtered_all_sheets,
+                filtered_summary_df,
+                filtered_sheet_order,
                 output_directory,
                 include_ungrouped=(args.department is None),
             )
@@ -287,7 +277,6 @@ def main() -> None:
 
     # ── Email dispatch (on by default; skip if --no-emails) ─────────────────────
     if args.send_emails:
-        # locate mapping file (first try the passed path, then bundle)
         config_file = args.emails_config
         if not os.path.isfile(config_file):
             config_file = resource_path(os.path.basename(config_file))
@@ -307,9 +296,7 @@ def main() -> None:
                 logger.warning("No recipients for '%s'; skipping email", dept_code)
                 continue
 
-            subject = (
-                f"Microsoft Defender Report for {dept_code} – {reference_date.isoformat()}"
-            )
+            subject = f"Microsoft Defender Report for {dept_code} – {reference_date.isoformat()}"
             body = (
                 f"Please find attached the Microsoft Defender report for department {dept_code} "
                 f"generated on {reference_date.isoformat()}.\n\n"
@@ -317,7 +304,6 @@ def main() -> None:
             )
 
             try:
-                # Prepare kwargs for send_email
                 email_kwargs = dict(
                     smtp_server=args.smtp_server,
                     smtp_port=args.smtp_port,
@@ -327,7 +313,6 @@ def main() -> None:
                     body=body,
                     attachments=[report_path],
                 )
-                # Only add auth if provided
                 if getattr(args, "smtp_user", None):
                     email_kwargs["smtp_user"] = args.smtp_user
                 if getattr(args, "smtp_password", None):
@@ -348,13 +333,12 @@ def main() -> None:
             "Install tabulate (`pip install tabulate`) to see a summary table"
         )
     else:
-        print()  # blank line for spacing
+        print()
         print("✓ Reports complete:\n")
         table = [("Master", args.output_path)] + dept_summaries
         print(tabulate(table, headers=["Report", "Path"], tablefmt="github"))
         print()
 
-    # wait for user input before exiting (Windows only)
     if os.name == "nt":
         width = shutil.get_terminal_size((80, 20)).columns
         msg = "✅  Reports complete  ✅"
