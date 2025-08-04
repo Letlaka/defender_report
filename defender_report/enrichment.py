@@ -5,23 +5,27 @@ import subprocess
 import tempfile
 import logging
 import datetime
-import pandas as pd
 from typing import Dict, List, Optional
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 def query_ad_computers(computer_names: List[str]) -> Dict[str, dict]:
     """
-    Batch-query AD via PowerShell/ADSI. Returns a map:
-    { COMPUTER_NAME: { LastLogonTimestamp, OperatingSystem,
-                       IPv4Address, DistinguishedName } }
+    Batch-query AD via PowerShell/ADSI and return a map:
+        { COMPUTER_NAME: { LastLogonTimestamp, OperatingSystem, IPv4Address, DistinguishedName } }
     """
-    # write the list of names to a temporary file
+    if not computer_names:
+        return {}
+
+    # Write device names to a temp file
     with tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt") as name_file:
-        name_file.write("\n".join(computer_names))
+        for name in computer_names:
+            name_file.write(f"{name}\n")
         names_path = name_file.name
 
-    # Powershell script that reads names and does an ADSI query
+    # Create PowerShell script for querying AD
     ps_script = f"""
 Add-Type -AssemblyName System.DirectoryServices
 $names = Get-Content -Path '{names_path}'
@@ -45,18 +49,25 @@ foreach ($cn in $names) {{
 }}
 $results | ConvertTo-Json -Depth 2
 """
-    # write and execute the PS script
+    # Write script to a temp file
     with tempfile.NamedTemporaryFile("w", delete=False, suffix=".ps1", encoding="utf-8") as ps_file:
         ps_file.write(ps_script)
         ps1_path = ps_file.name
 
-    proc = subprocess.run(
-        ["powershell", "-NoProfile", "-File", ps1_path],
-        capture_output=True,
-        text=True
-    )
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-File", ps1_path],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+    except Exception as e:
+        logger.error(f"Failed to execute PowerShell script: {e}")
+        os.unlink(names_path)
+        os.unlink(ps1_path)
+        return {}
 
-    # clean up
+    # Clean up temp files
     os.unlink(names_path)
     os.unlink(ps1_path)
 
@@ -78,18 +89,17 @@ $results | ConvertTo-Json -Depth 2
     return ad_map
 
 def convert_ad_timestamp(filetime: Optional[int]) -> Optional[datetime.datetime]:
-    """
-    Convert Windows FILETIME (100-ns intervals since 1601-01-01) to datetime.
-    """
+    """Convert Windows FILETIME (100-ns intervals since 1601-01-01) to datetime."""
     if not filetime:
         return None
-    microseconds = int(filetime) // 10
-    return datetime.datetime(1601, 1, 1) + datetime.timedelta(microseconds=microseconds)
+    try:
+        microseconds = int(filetime) // 10
+        return datetime.datetime(1601, 1, 1) + datetime.timedelta(microseconds=microseconds)
+    except Exception:
+        return None
 
 def parse_ou(distinguished_name: Optional[str]) -> str:
-    """
-    Extract the first OU component from a DistinguishedName string.
-    """
+    """Extract the first OU component from a DistinguishedName string."""
     if not distinguished_name:
         return "Unknown"
     for part in distinguished_name.split(","):
@@ -98,9 +108,7 @@ def parse_ou(distinguished_name: Optional[str]) -> str:
     return "Unknown"
 
 def get_ipv4_address(hostname: str) -> str:
-    """
-    Fallback DNS lookup for machines that did not report an IPv4Address in AD.
-    """
+    """Fallback DNS lookup for machines that did not report an IPv4Address in AD."""
     try:
         return socket.gethostbyname(hostname)
     except socket.gaierror:
@@ -111,19 +119,28 @@ def enrich_all_sheets_with_ad(
 ) -> Dict[str, pd.DataFrame]:
     """
     For each sheet in `all_sheets`, append AD columns by querying once
-    for every unique DeviceName.
+    for every unique DeviceName. Adds LastLogonDate, OperatingSystem,
+    OUName, and IPv4Address columns.
     """
-    # collect all unique names
     unique_names = {
         str(name).strip()
         for df in all_sheets.values()
+        if not df.empty and "DeviceName" in df.columns
         for name in df["DeviceName"].dropna().unique()
         if str(name).strip()
     }
+    if not unique_names:
+        logger.warning("No device names found for AD enrichment.")
+        return all_sheets
+
     ad_info_map = query_ad_computers(sorted(unique_names))
 
     enriched_sheets: Dict[str, pd.DataFrame] = {}
     for sheet_name, df in all_sheets.items():
+        if df.empty or "DeviceName" not in df.columns:
+            enriched_sheets[sheet_name] = df.copy()
+            continue
+
         df_copy = df.copy()
         last_logon_list, os_list, ip_list, ou_list = [], [], [], []
 

@@ -8,7 +8,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Map official department codes → sheet names
+# Official department code to canonical (sheet) name mapping
 DEPARTMENT_CODE_TO_SHEET: Dict[str, str] = {
     "GPEDU": "gpedu",
     "GPHEALTH": "gphealth",
@@ -27,25 +27,101 @@ DEPARTMENT_CODE_TO_SHEET: Dict[str, str] = {
     "GIFA": "gifa",
 }
 
-# Common text variants → official code
+# Text variant → official code mapping (expand as needed)
 VARIANT_TO_CODE: Dict[str, str] = {
+    # GPDRT Variants
     "gpdrt - k": "GPDRT",
     "gdrt": "GPDRT",
+    "(DLTC)": "GPDRT",
+    "(GFLEET)": "GPDRT",
+    "(GPDTR)": "GPDRT",
+    "(GPDRT": "GPDRT",
+    "(GPDRT))": "GPDRT",
+    "(GPDRT-K)": "GPDRT",
+
+    # GPHEALTH Variants
     "gp health": "GPHEALTH",
+    "(GPHEALTH))": "GPHEALTH",
+    "(GPHEALTH": "GPHEALTH",
+    "(GPHEALTH0": "GPHEALTH",
+    "(gpghealth)": "GPHEALTH",
+    "(gphealth": "GPHEALTH",
+    "(gphealth0": "GPHEALTH",
+    "Gphealth)": "GPHEALTH",
+    "(GPHealth": "GPHEALTH",
+    "(GPHeallth)": "GPHEALTH",
+    "(GPHealth}": "GPHEALTH",
+    "(GpHealth": "GPHEALTH",
     "bgh": "GPHEALTH",
-    "EGOV": "GPEGOV",
+    "(GHealth)": "GPHEALTH",
+    "(GPHEALH)": "GPHEALTH",
+    "(GPGEALTH)": "GPHEALTH",
+    "(gphiealth)": "GPHEALTH",
+
+    # GPEGOV Variants
     "egov": "GPEGOV",
+    "EGOV": "GPEGOV",
+
+    # GPDID Variants
+    "DID": "GPDID",
+    "(DID))": "GPDID",
+    "(GDID)": "GPDID",
+
+    # GPEDU Variants
+    "GPEDU)": "GPEDU",
+    "(GPEDU))": "GPEDU",
+    "(GDE)": "GPEDU",
+    "(GDEDU)": "GPEDU",
+    "(GDEDU)2": "GPEDU",
+    "(GPEDU)1": "GPEDU",
+    "[GPEDU]": "GPEDU",
+    "(GPED)": "GPEDU",
+    "(MC)": "GPEDU",
+    "(PEDU)": "GPEDU",
+
+    # GDARD Variants
+    "(GDACE)": "GDARD",
+    "(GDARDE)": "GDARD",
+    "(GDARD": "GDARD",
+    "(GDEnv)": "GDARD",
+
+    # GPGDED Variants
+    "(GPDED)": "GPGDED",
+    "(GPGDED": "GPGDED",
+    "GPGDED": "GPGDED",
+
+    # GPDPR Variants
+    "(GPRPR)": "GPDPR",
+    "GPDPR)": "GPDPR",
+    "(GPDPDR)": "GPDPR",
+
+    # GDHUS Variants
+    "(GDHuS": "GDHUS",
+    "(GDHS)": "GDHUS",
+
+    # GPSAS Variants
+    "GPSAS)": "GPSAS",
+    "(GPSAS))": "GPSAS",
+
+    # GPSPORTS Variants
+    "(GPsport)": "GPSPORTS",
+
+    # GIFA
+    "gifa": "GIFA",
 }
+
 
 def extract_bracket_text(user_name: str) -> Optional[str]:
     """
     Extract the text inside the final parentheses of `user_name`.
-    E.g. "Bob (GPEDU)" → "gpedu"
+    E.g. "Bob (GPEDU)" → "GPEDU"
     """
+    if not user_name:
+        return None
     match = re.search(r"\(([^)]+)\)\s*$", user_name.strip())
     if not match:
         return None
-    return match.group(1).strip().lower()
+    return match.group(1).strip()
 
 def normalize_department_code(raw_text: Optional[str]) -> Optional[str]:
     """
@@ -54,10 +130,13 @@ def normalize_department_code(raw_text: Optional[str]) -> Optional[str]:
     """
     if not raw_text:
         return None
-    if raw_text in VARIANT_TO_CODE:
-        return VARIANT_TO_CODE[raw_text]
+    lower_raw = raw_text.lower().strip()
+    if lower_raw in VARIANT_TO_CODE:
+        return VARIANT_TO_CODE[lower_raw]
     cleaned = re.sub(r"[^A-Za-z0-9]", "", raw_text).upper()
-    return cleaned if cleaned in DEPARTMENT_CODE_TO_SHEET else None
+    if cleaned in DEPARTMENT_CODE_TO_SHEET:
+        return cleaned
+    return None
 
 def load_sheet_order(template_path: str) -> List[str]:
     """
@@ -77,7 +156,8 @@ def group_rows_by_department(data_frame: pd.DataFrame) -> Dict[str, pd.DataFrame
     """
     groups: Dict[str, List[pd.Series]] = {}
     for _, row in data_frame.iterrows():
-        raw = extract_bracket_text(str(row.get("UserName", "")))
+        user_name = str(row.get("UserName", "")).strip()
+        raw = extract_bracket_text(user_name)
         code = normalize_department_code(raw)
         sheet_name = DEPARTMENT_CODE_TO_SHEET.get(code, "ungrouped")
         groups.setdefault(sheet_name, []).append(row)

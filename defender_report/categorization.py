@@ -6,24 +6,47 @@ import pandas as pd
 def categorize_dataframe(
     data_frame: pd.DataFrame,
     reference_date: datetime.date,
-    threshold_days: int
+    threshold_days: int,
 ) -> pd.DataFrame:
     """
-    Add a "Status" column to indicate whether each row's
-    LastReportedDateTime is within `threshold_days` of `reference_date`.
+    Add compliance columns based on reporting time.
+    Adds:
+        - Status ("UpToDate"/"OutOfDate")
+        - ComplianceLevel
+        - ComplianceSeverity
+        - ComplianceReason
     """
     cutoff_date = reference_date - datetime.timedelta(days=threshold_days)
     df = data_frame.copy()
-    df["LastReportedDateTime"] = pd.to_datetime(
-        df["LastReportedDateTime"], errors="coerce"
-    )
-    df["Status"] = df["LastReportedDateTime"].apply(
-        lambda timestamp: (
-            "UpToDate"
-            if pd.notna(timestamp) and timestamp.date() >= cutoff_date
-            else "OutOfDate"
-        )
-    )
+    df["LastReportedDateTime"] = pd.to_datetime(df.get("LastReportedDateTime", ""), errors="coerce")
+
+    def assess_row(row):
+        last_reported = row.get("LastReportedDateTime")
+        if pd.isna(last_reported):
+            return {
+                "Status": "OutOfDate",
+                "ComplianceLevel": "Critical",
+                "ComplianceSeverity": "critical",
+                "ComplianceReason": "No check-in date",
+            }
+        if last_reported.date() >= cutoff_date:
+            return {
+                "Status": "UpToDate",
+                "ComplianceLevel": "Fully Compliant",
+                "ComplianceSeverity": "ok",
+                "ComplianceReason": "Device is up to date",
+            }
+        else:
+            return {
+                "Status": "OutOfDate",
+                "ComplianceLevel": "Not Compliant",
+                "ComplianceSeverity": "critical",
+                "ComplianceReason": "Missed check-in window",
+            }
+
+    assess_results = df.apply(assess_row, axis=1, result_type="expand")
+    for col in ["Status", "ComplianceLevel", "ComplianceSeverity", "ComplianceReason"]:
+        df[col] = assess_results[col]
     return df
 
 def tally_dataframe(data_frame: pd.DataFrame) -> Dict[str, float]:

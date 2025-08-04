@@ -1,14 +1,14 @@
 import os
 import smtplib
+import mimetypes
 from email.message import EmailMessage
-from typing import List, Optional
-
+from typing import List, Optional, Union
 
 def send_email(
     smtp_server: str,
     smtp_port: int,
     from_addr: str,
-    to_addrs: List[str],
+    to_addrs: Union[str, List[str]],
     subject: str,
     body: str,
     attachments: Optional[List[str]] = None,
@@ -16,34 +16,51 @@ def send_email(
     smtp_password: Optional[str] = None,
 ) -> None:
     """
-    Send an email with the given attachments via an SMTP server.
-    If smtp_user and smtp_password are provided, use TLS and authenticate.
-    Otherwise, send mail anonymously (like SCCM relay).
+    Send an email (optionally with attachments) via an SMTP server.
+    Uses TLS and authentication if credentials are provided.
+    Falls back to anonymous SMTP relay if not.
+    Raises RuntimeError on failure.
+
+    Args:
+        smtp_server: SMTP host (e.g. 'smtp.example.com')
+        smtp_port: SMTP port (usually 587)
+        from_addr: The "From" email address
+        to_addrs: Recipient address(es) as list or comma-separated string
+        subject: Email subject
+        body: Email body (plain text)
+        attachments: List of file paths to attach (optional)
+        smtp_user: SMTP username (optional)
+        smtp_password: SMTP password (optional)
     """
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = from_addr
-    # Always ensure to_addrs is a list of strings
     if isinstance(to_addrs, str):
-        to_addrs = [to_addrs]
+        to_addrs = [addr.strip() for addr in to_addrs.split(",") if addr.strip()]
     msg["To"] = ", ".join(to_addrs)
     msg.set_content(body)
 
-    # Attach files if any
+    # Attach any files
     if attachments:
         for file_path in attachments:
-            with open(file_path, "rb") as f:
-                data = f.read()
-            maintype, subtype = ("application", "octet-stream")
-            filename = os.path.basename(file_path)
-            msg.add_attachment(
-                data, maintype=maintype, subtype=subtype, filename=filename
-            )
+            try:
+                with open(file_path, "rb") as f:
+                    data = f.read()
+                ctype, encoding = mimetypes.guess_type(file_path)
+                if ctype is None or encoding is not None:
+                    ctype = "application/octet-stream"
+                maintype, subtype = ctype.split("/", 1)
+                filename = os.path.basename(file_path)
+                msg.add_attachment(
+                    data, maintype=maintype, subtype=subtype, filename=filename
+                )
+            except Exception as e:
+                raise RuntimeError(f"Failed to attach file '{file_path}': {e}") from e
 
     try:
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
+        with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as server:
+            server.ehlo()
             if smtp_user and smtp_password:
-                server.ehlo()
                 server.starttls()
                 server.ehlo()
                 server.login(smtp_user, smtp_password)

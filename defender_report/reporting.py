@@ -1,4 +1,3 @@
-# defender_report/reporting.py
 import datetime
 import logging
 import os
@@ -7,29 +6,19 @@ from typing import Dict, List, Tuple
 import pandas as pd
 from tqdm import tqdm
 
+from defender_report.utils import make_datetime_columns_timezone_naive
+
 logger = logging.getLogger(__name__)
 
 
 def _nested_report_folder(
     root_directory: str, department: str, report_date: datetime.date
 ) -> str:
-    """
-    Build and return a nested folder path:
-      root_directory/
-        department/
-          {financial_year}/
-            Q{1–4}/
-              {MonthName}/
-                {YYYY-MM-DD}/
-    """
+    """Build nested output path for a department report by date/quarter."""
     month = report_date.month
     year = report_date.year
-
-    # financial year
     fy_start = year if month >= 4 else year - 1
     financial_year = f"{fy_start}-{fy_start + 1}"
-
-    # quarter
     quarter = (
         "Q1"
         if 4 <= month <= 6
@@ -39,12 +28,11 @@ def _nested_report_folder(
         if 10 <= month <= 12
         else "Q4"
     )
-
     path_parts = [
-        root_directory,
-        department,
-        financial_year,
-        quarter,
+        str(root_directory),
+        str(department),
+        str(financial_year),
+        str(quarter),
         report_date.strftime("%B"),
         report_date.isoformat(),
     ]
@@ -53,32 +41,28 @@ def _nested_report_folder(
     return full_path
 
 
-def _create_compliance_formats(workbook):
-    green = workbook.add_format({"bg_color": "#00b050", "num_format": "0.0%"})
-    yellow = workbook.add_format({"bg_color": "#ffff00", "num_format": "0.0%"})
-    red = workbook.add_format({"bg_color": "#ff0000", "num_format": "0.0%"})
-    return green, yellow, red
-
-
 def _write_table(
     writer: pd.ExcelWriter,
     dataframe: pd.DataFrame,
     sheet_name: str,
     style_name: str = "Table Style Medium 16",
 ) -> None:
+    """Write a formatted table to an Excel sheet."""
+    dataframe = make_datetime_columns_timezone_naive(dataframe)
     dataframe.to_excel(writer, sheet_name=sheet_name, index=False)
     worksheet = writer.sheets[sheet_name]
     rows, cols = dataframe.shape
-    worksheet.add_table(
-        0,
-        0,
-        rows,
-        cols - 1,
-        {
-            "style": style_name,
-            "columns": [{"header": c} for c in dataframe.columns],
-        },
-    )
+    if rows > 0 and cols > 0:
+        worksheet.add_table(
+            0,
+            0,
+            rows,
+            cols - 1,
+            {
+                "style": style_name,
+                "columns": [{"header": c} for c in dataframe.columns],
+            },
+        )
 
 
 def _write_summary_table(
@@ -87,62 +71,53 @@ def _write_summary_table(
     sheet_name: str,
     report_date: datetime.date,
 ) -> None:
+    """Write the summary sheet (always styled, always fixed columns)."""
     workbook = writer.book
     worksheet = workbook.add_worksheet(sheet_name)
     writer.sheets[sheet_name] = worksheet
 
     # Formats
-    date_fmt = workbook.add_format(
-        {
-            "bold": True,
-            "align": "center",
-            "font_size": 14,
-            "bg_color": "#4F81BD",
-            "font_color": "#000000",
-        }
-    )
-    header_fmt = workbook.add_format(
-        {
-            "bold": True,
-            "align": "center",
-            "valign": "vcenter",
-            "font_color": "#FFFFFF",
-            "bg_color": "#16365C",
-            "border": 1,
-        }
-    )
-
-    
+    date_fmt = workbook.add_format({
+        "bold": True,
+        "align": "center",
+        "font_size": 14,
+        "bg_color": "#4F81BD",
+        "font_color": "#000000",
+    })
+    header_fmt = workbook.add_format({
+        "bold": True,
+        "align": "center",
+        "valign": "vcenter",
+        "font_color": "#FFFFFF",
+        "bg_color": "#16365C",
+        "border": 1,
+    })
     cell_fmt = workbook.add_format({"border": 1, "align": "center"})
-    green_fmt = workbook.add_format(
-        {"bg_color": "#00b050", "num_format": "0.0%", "border": 1, "align": "center"}
-    )
-    yellow_fmt = workbook.add_format(
-        {"bg_color": "#ffff00", "num_format": "0.0%", "border": 1, "align": "center"}
-    )
-    red_fmt = workbook.add_format(
-        {"bg_color": "#ff0000", "num_format": "0.0%", "border": 1, "align": "center"}
-    )
+    green_fmt = workbook.add_format({
+        "bg_color": "#00b050", "num_format": "0.0%", "border": 1, "align": "center"
+    })
+    yellow_fmt = workbook.add_format({
+        "bg_color": "#ffff00", "num_format": "0.0%", "border": 1, "align": "center"
+    })
+    red_fmt = workbook.add_format({
+        "bg_color": "#ff0000", "num_format": "0.0%", "border": 1, "align": "center"
+    })
 
-    # Merge/center date in row 1
     col_count = len(summary_dataframe.columns)
-    worksheet.merge_range(
-        0, 0, 0, col_count - 1, report_date.strftime("%d-%b"), date_fmt
-    )
+    worksheet.merge_range(0, 0, 0, col_count - 1, report_date.strftime("%d-%b"), date_fmt)
 
-    # Write header row and enable autofilter
     for col_idx, col in enumerate(summary_dataframe.columns):
         worksheet.write(1, col_idx, col, header_fmt)
-        worksheet.set_column(col_idx, col_idx, 16)
+        worksheet.set_column(col_idx, col_idx, 18)
     worksheet.autofilter(1, 0, 1, col_count - 1)
 
-    # Write table body with zebra striping and compliance coloring
+    # Table body with compliance coloring and zebra striping
     for row_idx, (_, row) in enumerate(summary_dataframe.iterrows()):
         excel_row = 2 + row_idx
         is_zebra = row_idx % 2 == 1
         for col_idx, col in enumerate(summary_dataframe.columns):
             value = row[col]
-            # Compliance coloring
+            fmt = cell_fmt
             if col.lower() == "compliance":
                 try:
                     v = float(value)
@@ -154,13 +129,10 @@ def _write_summary_table(
                         fmt = red_fmt
                 except Exception:
                     fmt = cell_fmt
-            else:
-                if is_zebra:
-                    fmt = workbook.add_format(
-                        {"bg_color": "#F2F2F2", "border": 1, "align": "center"}
-                    )
-                else:
-                    fmt = cell_fmt
+            elif is_zebra:
+                fmt = workbook.add_format(
+                    {"bg_color": "#F2F2F2", "border": 1, "align": "center"}
+                )
             worksheet.write(excel_row, col_idx, value, fmt)
 
     # Legend block below table (leave a gap)
@@ -182,7 +154,13 @@ def write_full_report(
     output_path: str,
     include_ungrouped: bool = True,
 ) -> None:
-    # Map codes to display names (same as above)
+    """
+    Write the master Excel report.
+    Only exports the *essential* columns in each department sheet.
+    """
+    from defender_report.utils import make_datetime_columns_timezone_naive
+
+    # Department display names
     display_map = {
         "gdard": "AGRIC",
         "cogta": "COGTA",
@@ -204,32 +182,39 @@ def write_full_report(
     if include_ungrouped and "ungrouped" not in sheet_order:
         sheet_order = sheet_order + ["ungrouped"]
 
+    # Only export the minimum columns for master (no advanced forensic/AD fields)
+    essential_cols = [
+        "DeviceName",
+        "UserName",
+        "LastReportedDateTime",
+        "Status",
+        "SignatureVersion",
+        "SignatureLastUpdated",
+        "EngineVersion",
+        "PlatformVersion",
+        "ComplianceLevel",
+        "ComplianceSeverity",
+        "ComplianceReason",
+    ]
+
     report_date = datetime.date.today()
     logger.info("Starting master report: %s", output_path)
 
-    with pd.ExcelWriter(
-        output_path, engine="xlsxwriter", datetime_format="yyyy-mm-dd"
-    ) as writer:
-        # per-department sheets (loop by code, use display name for sheet)
+    with pd.ExcelWriter(output_path, engine="xlsxwriter", datetime_format="yyyy-mm-dd") as writer:
         for dept_code in tqdm(sheet_order, desc="Master sheets", unit="sheet"):
             df = all_sheets.get(dept_code, pd.DataFrame())
-            sheet_name = display_map.get(dept_code, dept_code)
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-            ws = writer.sheets[sheet_name]
-            r, c = df.shape
-            if r > 0 and c > 0:
-                ws.add_table(
-                    0,
-                    0,
-                    r,
-                    c - 1,
-                    {
-                        "style": "Table Style Medium 16",
-                        "columns": [{"header": h} for h in df.columns],
-                    },
-                )
+            if not df.empty:
+                cols_present = [c for c in essential_cols if c in df.columns]
+                # Reorder + append any extra columns to end (but never forensic/AD columns)
+                df_export = df[cols_present + [c for c in df.columns if c not in cols_present]]
+                df_export = make_datetime_columns_timezone_naive(df_export)
+                sheet_name = display_map.get(dept_code, dept_code)
+                _write_table(writer, df_export, sheet_name)
+            else:
+                ws = writer.book.add_worksheet(display_map.get(dept_code, dept_code))
+                ws.write(0, 0, "No data for this department.")
+                writer.sheets[display_map.get(dept_code, dept_code)] = ws
 
-        # summary sheet
         _write_summary_table(writer, summary_df, "Summary", report_date)
 
     logger.info("Master report written to %s", output_path)
@@ -243,17 +228,18 @@ def write_department_reports(
     include_ungrouped: bool = True,
 ) -> List[Tuple[str, str]]:
     """
-    Generate one report per department in a nested folder tree.
-    The 'Summary' sheet always uses columns A-H, with only the header and that department's row,
+    Generate one workbook per department (full details).
+    The 'Summary' sheet always uses columns A–H, with only the header and that department's row,
     and the compliance cell color-coded as per the legend.
     Returns a list of (department_code, path_to_file).
     """
+    from defender_report.utils import make_datetime_columns_timezone_naive
+
     report_date = datetime.date.today()
     depts = list(sheet_order)
     if include_ungrouped and "ungrouped" not in depts:
         depts.append("ungrouped")
 
-    # Standard summary columns (A–H)
     summary_columns = [
         "Department",
         "DeviceCount",
@@ -264,9 +250,8 @@ def write_department_reports(
         "Out of Date",
         "Compliance",
     ]
-    col_count = len(summary_columns)  # 8
+    col_count = len(summary_columns)
 
-    # Display map for department codes to display names
     display_map = {
         "gdard": "AGRIC",
         "cogta": "COGTA",
@@ -292,87 +277,68 @@ def write_department_reports(
         filename = f"{dept}_Report_{report_date.isoformat()}.xlsx"
         full_path = os.path.join(target, filename)
 
-        with pd.ExcelWriter(
-            full_path, engine="xlsxwriter", datetime_format="yyyy-mm-dd"
-        ) as writer:
-            # Department data sheet
+        with pd.ExcelWriter(full_path, engine="xlsxwriter", datetime_format="yyyy-mm-dd") as writer:
+            # Per-department: export all columns
             dept_data = all_sheets.get(dept, pd.DataFrame())
             if not dept_data.empty:
+                dept_data = make_datetime_columns_timezone_naive(dept_data)
                 _write_table(writer, dept_data, dept)
             else:
                 worksheet = writer.book.add_worksheet(dept)
                 worksheet.write(0, 0, "No data for this department.")
                 writer.sheets[dept] = worksheet
 
-            # Stylized SUMMARY SHEET, using columns A–H only
+            # Stylized summary for this department
             worksheet = writer.book.add_worksheet("Summary")
             writer.sheets["Summary"] = worksheet
 
             # --- Formats ---
-            date_fmt = writer.book.add_format(
-                {
-                    "bold": True,
-                    "align": "center",
-                    "font_size": 14,
-                    "bg_color": "#C9DAF8",
-                    "border": 1,
-                }
-            )
-            header_fmt = writer.book.add_format(
-                {
-                    "bold": True,
-                    "align": "center",
-                    "valign": "vcenter",
-                    "font_color": "#FFFFFF",
-                    "bg_color": "#4F81BD",
-                    "border": 1,
-                }
-            )
-            normal_fmt = writer.book.add_format(
-                {
-                    "align": "center",
-                    "valign": "vcenter",
-                    "border": 1,
-                }
-            )
-            # Compliance formats
-            green_fmt = writer.book.add_format(
-                {
-                    "bg_color": "#00b050",
-                    "align": "center",
-                    "valign": "vcenter",
-                    "border": 1,
-                    "num_format": "0.0%",
-                    "bold": True,
-                }
-            )
-            yellow_fmt = writer.book.add_format(
-                {
-                    "bg_color": "#ffff00",
-                    "align": "center",
-                    "valign": "vcenter",
-                    "border": 1,
-                    "num_format": "0.0%",
-                    "bold": True,
-                }
-            )
-            red_fmt = writer.book.add_format(
-                {
-                    "bg_color": "#ff0000",
-                    "align": "center",
-                    "valign": "vcenter",
-                    "border": 1,
-                    "num_format": "0.0%",
-                    "bold": True,
-                }
-            )
+            date_fmt = writer.book.add_format({
+                "bold": True,
+                "align": "center",
+                "font_size": 14,
+                "bg_color": "#C9DAF8",
+                "border": 1,
+            })
+            header_fmt = writer.book.add_format({
+                "bold": True,
+                "align": "center",
+                "valign": "vcenter",
+                "font_color": "#FFFFFF",
+                "bg_color": "#4F81BD",
+                "border": 1,
+            })
+            normal_fmt = writer.book.add_format({
+                "align": "center",
+                "valign": "vcenter",
+                "border": 1,
+            })
+            green_fmt = writer.book.add_format({
+                "bg_color": "#00b050",
+                "align": "center",
+                "valign": "vcenter",
+                "border": 1,
+                "num_format": "0.0%",
+                "bold": True,
+            })
+            yellow_fmt = writer.book.add_format({
+                "bg_color": "#ffff00",
+                "align": "center",
+                "valign": "vcenter",
+                "border": 1,
+                "num_format": "0.0%",
+                "bold": True,
+            })
+            red_fmt = writer.book.add_format({
+                "bg_color": "#ff0000",
+                "align": "center",
+                "valign": "vcenter",
+                "border": 1,
+                "num_format": "0.0%",
+                "bold": True,
+            })
 
-            # Merge for the date (A1:H1)
-            worksheet.merge_range(
-                0, 0, 0, col_count - 1, report_date.strftime("%d-%b"), date_fmt
-            )
-
-            # Write headers (A2:H2)
+            worksheet.merge_range(0, 0, 0, col_count - 1, report_date.strftime("%d-%b"), date_fmt)
             for col_idx, col_name in enumerate(summary_columns):
                 worksheet.write(1, col_idx, col_name, header_fmt)
 
@@ -385,18 +351,12 @@ def write_department_reports(
                 dept_summary_row = summary_dataframe[
                     summary_dataframe["Department"] == dept
                 ]
-
             if not dept_summary_row.empty:
-                # Safely pull values for the fixed column list (use blank if missing)
                 row_vals = [
-                    dept_summary_row[col].iloc[0]
-                    if col in dept_summary_row.columns
-                    else ""
+                    dept_summary_row[col].iloc[0] if col in dept_summary_row.columns else ""
                     for col in summary_columns
                 ]
-                for col_idx, (col_name, value) in enumerate(
-                    zip(summary_columns, row_vals)
-                ):
+                for col_idx, (col_name, value) in enumerate(zip(summary_columns, row_vals)):
                     if col_name.lower() == "compliance":
                         try:
                             compliance_val = float(value)
@@ -418,14 +378,11 @@ def write_department_reports(
                     2, 0, "No summary data available for this department.", header_fmt
                 )
 
-            # Set widths for A–H
             for col_idx in range(col_count):
                 worksheet.set_column(col_idx, col_idx, 16)
-
-            # Freeze below the department row
             worksheet.freeze_panes(3, 0)
 
-            # Legend starting at A5
+            # Legend
             legend = [
                 ("Baseline 80%", None),
                 ("> 80% (green)", "#00b050"),
