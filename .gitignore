@@ -31,3 +31,9 @@ DefenderAgents_Report.xlsx
 DefenderAgents.xlsx
 .env
 emails_config.json
+.ad_cache.json
+DefenderReport.spec
+DefenderReportGenerator.spec
+unmatched_devices.csv
+unmatched_devices.json
+

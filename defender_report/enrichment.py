@@ -1,139 +1,163 @@
-import json
 import os
-import socket
-import subprocess
-import tempfile
+import sys
+import json
 import logging
 import datetime
-from typing import Dict, List, Optional
+import pathlib
+from typing import Dict, List, Optional, Tuple
+from tqdm import tqdm
 
 import pandas as pd
+from dotenv import load_dotenv
+from ldap3 import Server, Connection, ALL, SUBTREE
 
 logger = logging.getLogger(__name__)
 
-def query_ad_computers(computer_names: List[str]) -> Dict[str, dict]:
-    """
-    Batch-query AD via PowerShell/ADSI and return a map:
-        { COMPUTER_NAME: { LastLogonTimestamp, OperatingSystem, IPv4Address, DistinguishedName } }
-    """
-    if not computer_names:
-        return {}
 
-    # Write device names to a temp file
-    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt") as name_file:
-        for name in computer_names:
-            name_file.write(f"{name}\n")
-        names_path = name_file.name
+def get_project_root() -> str:
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return str(pathlib.Path(__file__).resolve().parents[1])
 
-    # Create PowerShell script for querying AD
-    ps_script = f"""
-Add-Type -AssemblyName System.DirectoryServices
-$names = Get-Content -Path '{names_path}'
-$results = @()
-foreach ($cn in $names) {{
-    $searcher = New-Object System.DirectoryServices.DirectorySearcher
-    $searcher.Filter = "(cn=$cn)"
-    $searcher.PropertiesToLoad.AddRange(@('lastLogonTimestamp','operatingSystem','ipv4Address','distinguishedName'))
-    $entry = $searcher.FindOne()
-    if ($entry) {{
-        $p = $entry.Properties
-        $obj = [PSCustomObject]@{{
-            Name               = $entry.Properties['cn'][0]
-            LastLogonTimestamp = $p['lastLogonTimestamp'][0]
-            OperatingSystem    = $p['operatingSystem'][0]
-            IPv4Address        = $p['ipv4Address'][0]
-            DistinguishedName  = $p['distinguishedName'][0]
-        }}
-        $results += $obj
-    }}
-}}
-$results | ConvertTo-Json -Depth 2
-"""
-    # Write script to a temp file
-    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".ps1", encoding="utf-8") as ps_file:
-        ps_file.write(ps_script)
-        ps1_path = ps_file.name
 
-    try:
-        proc = subprocess.run(
-            ["powershell", "-NoProfile", "-File", ps1_path],
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
-    except Exception as e:
-        logger.error(f"Failed to execute PowerShell script: {e}")
-        os.unlink(names_path)
-        os.unlink(ps1_path)
-        return {}
+# Load .env
+load_dotenv(os.path.join(get_project_root(), ".env"))
 
-    # Clean up temp files
-    os.unlink(names_path)
-    os.unlink(ps1_path)
+AD_SERVER = os.getenv("AD_SERVER")
+AD_USERNAME = os.getenv("AD_USERNAME")
+AD_PASSWORD = os.getenv("AD_PASSWORD")
+AD_BASE_DN = os.getenv("AD_BASE_DN")
 
-    if proc.returncode != 0:
-        logger.error("AD batch failed: %s", proc.stderr.strip())
-        return {}
+CACHE_FILE = os.path.join(get_project_root(), ".ad_cache.json")
 
-    try:
-        entries = json.loads(proc.stdout) if proc.stdout else []
-    except json.JSONDecodeError:
-        logger.error("Invalid JSON from AD query: %.200s", proc.stdout)
-        return {}
 
-    ad_map: Dict[str, dict] = {}
-    for entry in (entries if isinstance(entries, list) else [entries]):
-        name = entry.get("Name")
-        if name:
-            ad_map[name] = entry
-    return ad_map
+def get_batch_size(device_count: int) -> int:
+    if device_count > 10000:
+        return 100
+    elif device_count > 5000:
+        return 150
+    elif device_count > 1000:
+        return 200
+    return 300
 
-def convert_ad_timestamp(filetime: Optional[int]) -> Optional[datetime.datetime]:
-    """Convert Windows FILETIME (100-ns intervals since 1601-01-01) to datetime."""
+
+def get_first(attr: dict, key: str) -> Optional[str]:
+    val = attr.get(key)
+    return val[0] if isinstance(val, list) and val else None
+
+
+def convert_ad_timestamp(filetime: Optional[str]) -> Optional[str]:
     if not filetime:
         return None
     try:
         microseconds = int(filetime) // 10
-        return datetime.datetime(1601, 1, 1) + datetime.timedelta(microseconds=microseconds)
-    except Exception:
+        dt = datetime.datetime(1601, 1, 1) + datetime.timedelta(microseconds=microseconds)
+        return dt.isoformat()
+    except Exception as e:
+        logger.warning(f"Failed to convert AD timestamp '{filetime}': {e}")
         return None
 
-def parse_ou(distinguished_name: Optional[str]) -> str:
-    """Extract the first OU component from a DistinguishedName string."""
-    if not distinguished_name:
-        return "Unknown"
-    for part in distinguished_name.split(","):
-        if part.strip().upper().startswith("OU="):
-            return part.strip()[3:]
-    return "Unknown"
 
-def get_ipv4_address(hostname: str) -> str:
-    """Fallback DNS lookup for machines that did not report an IPv4Address in AD."""
+def parse_ou_path(dn: Optional[str]) -> str:
+    if not dn:
+        return "Unknown"
+    return "/".join([part[3:] for part in dn.split(",") if part.strip().upper().startswith("OU=")])
+
+def query_ad_computers(computer_names: List[str]) -> Tuple[Dict[str, dict], List[str]]:
+    if not all([AD_SERVER, AD_USERNAME, AD_PASSWORD, AD_BASE_DN]):
+        logger.error("Missing LDAP configuration in environment.")
+        return {}, list(computer_names)
+
+    # Load cache
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            cache = json.load(f)
+    else:
+        cache = {}
+
+    ad_map: Dict[str, dict] = {}
+    unmatched: List[str] = []
+    to_query = sorted({name for name in computer_names if name and name not in cache})
+
     try:
-        return socket.gethostbyname(hostname)
-    except socket.gaierror:
-        return "N/A"
+        server = Server(str(AD_SERVER), get_info=ALL)
+        conn = Connection(server, user=AD_USERNAME, password=AD_PASSWORD,
+                          authentication="SIMPLE", auto_bind=True)
+    except Exception as e:
+        logger.error(f"LDAP bind failed: {e}")
+        return {}, to_query
+
+    batch_size = get_batch_size(len(to_query))
+    logger.info(f"Querying {len(to_query)} new devices in batches of {batch_size}...")
+
+    def chunked(items: List[str], size: int) -> List[List[str]]:
+        return [items[i:i + size] for i in range(0, len(items), size)]
+
+    for batch in tqdm(chunked(to_query, batch_size), desc="AD Lookup", unit="batch"):
+        search_filter = f"(|{''.join(f'(cn={name})' for name in batch)})"
+        attributes = ["cn", "lastLogonTimestamp", "operatingSystem", "distinguishedName"]
+
+        try:
+            search_base = AD_BASE_DN or ""
+            if conn.search(search_base, search_filter, search_scope=SUBTREE, attributes=attributes):
+                found = {get_first(e.entry_attributes_as_dict, "cn"): e.entry_attributes_as_dict for e in conn.entries}
+
+                for name in batch:
+                    entry = found.get(name)
+                    if not entry:
+                        unmatched.append(name)
+                        continue
+                    raw_ts = get_first(entry, "lastLogonTimestamp")
+                    if isinstance(raw_ts, datetime.datetime):
+                        timestamp = raw_ts.isoformat()
+                    elif raw_ts:
+                        try:
+                            timestamp = convert_ad_timestamp(str(raw_ts))
+                        except Exception as e:
+                            logger.warning(f"Failed to convert lastLogonTimestamp for {name}: {raw_ts} → {e}")
+                            timestamp = None
+                    else:
+                        timestamp = None
+
+                    logger.debug(f"{name}: raw_ts={raw_ts} → parsed={timestamp}")                    
+                    cache[name] = {
+                        "Name": name.strip(),
+                        "LastLogonTimestamp": timestamp,
+                        "OperatingSystem": get_first(entry, "operatingSystem"),
+                        "DistinguishedName": get_first(entry, "distinguishedName"),
+                    }
+            else:
+                unmatched.extend(batch)
+        except Exception as e:
+            logger.warning(f"Batch failed: {e}")
+            unmatched.extend(batch)
+
+    conn.unbind()
+
+    # Save updated cache
+    with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=2)
+
+    ad_map.update(cache)
+    logger.info("LDAP query complete. Total enriched devices: %d", len(ad_map))
+    return ad_map, unmatched
+
 
 def enrich_all_sheets_with_ad(
-    all_sheets: Dict[str, pd.DataFrame]
+    all_sheets: Dict[str, pd.DataFrame],
+    export_dir: Optional[str] = None
 ) -> Dict[str, pd.DataFrame]:
-    """
-    For each sheet in `all_sheets`, append AD columns by querying once
-    for every unique DeviceName. Adds LastLogonDate, OperatingSystem,
-    OUName, and IPv4Address columns.
-    """
-    unique_names = {
+    all_names = {
         str(name).strip()
         for df in all_sheets.values()
         if not df.empty and "DeviceName" in df.columns
         for name in df["DeviceName"].dropna().unique()
-        if str(name).strip()
     }
-    if not unique_names:
+    if not all_names:
         logger.warning("No device names found for AD enrichment.")
         return all_sheets
 
-    ad_info_map = query_ad_computers(sorted(unique_names))
+    ad_map, unmatched = query_ad_computers(sorted(all_names))
 
     enriched_sheets: Dict[str, pd.DataFrame] = {}
     for sheet_name, df in all_sheets.items():
@@ -142,20 +166,26 @@ def enrich_all_sheets_with_ad(
             continue
 
         df_copy = df.copy()
-        last_logon_list, os_list, ip_list, ou_list = [], [], [], []
+        def safe_get(field: str, name: str) -> Optional[str]:
+            record = ad_map.get(name)
+            if isinstance(record, dict):
+                return record.get(field)
+            return None        
+        df_copy["LastLogonDate"] = df_copy["DeviceName"].map(lambda n: safe_get("LastLogonTimestamp", str(n)))
+        df_copy["OperatingSystem"] = df_copy["DeviceName"].map(lambda n: safe_get("OperatingSystem", str(n)))
+        df_copy["OUName"] = df_copy["DeviceName"].map(lambda n: parse_ou_path(ad_map.get(n, {}).get("DistinguishedName")))
 
-        for _, row in df_copy.iterrows():
-            machine_name = str(row.get("DeviceName", "")).strip()
-            info = ad_info_map.get(machine_name, {})
-            last_logon_list.append(convert_ad_timestamp(info.get("LastLogonTimestamp")))
-            os_list.append(info.get("OperatingSystem"))
-            ip_list.append(info.get("IPv4Address") or get_ipv4_address(machine_name))
-            ou_list.append(parse_ou(info.get("DistinguishedName")))
-
-        df_copy["LastLogonDate"] = last_logon_list
-        df_copy["OperatingSystem"] = os_list
-        df_copy["OUName"] = ou_list
-        df_copy["IPv4Address"] = ip_list
         enriched_sheets[sheet_name] = df_copy
+
+    # Export unmatched
+    if unmatched:
+        unmatched_df = pd.DataFrame({"DeviceName": unmatched})
+        csv_path = os.path.join(export_dir or os.getcwd(), "unmatched_devices.csv")
+        json_path = os.path.join(export_dir or os.getcwd(), "unmatched_devices.json")
+        unmatched_df.to_csv(csv_path, index=False)
+        unmatched_df.to_json(json_path, orient="records", indent=2)
+        logger.warning(f"{len(unmatched)} unmatched devices written to:")
+        logger.warning(f"  - {csv_path}")
+        logger.warning(f"  - {json_path}")
 
     return enriched_sheets

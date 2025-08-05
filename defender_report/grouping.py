@@ -146,7 +146,9 @@ def load_sheet_order(template_path: str) -> List[str]:
     if not os.path.exists(template_path):
         logger.error("Template not found: %s", template_path)
         sys.exit(1)
-    return pd.ExcelFile(template_path, engine="openpyxl").sheet_names
+    return [
+        str(name) for name in pd.ExcelFile(template_path, engine="openpyxl").sheet_names
+    ]
 
 def group_rows_by_department(data_frame: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     """
@@ -159,6 +161,6 @@ def group_rows_by_department(data_frame: pd.DataFrame) -> Dict[str, pd.DataFrame
         user_name = str(row.get("UserName", "")).strip()
         raw = extract_bracket_text(user_name)
         code = normalize_department_code(raw)
-        sheet_name = DEPARTMENT_CODE_TO_SHEET.get(code, "ungrouped")
+        sheet_name = DEPARTMENT_CODE_TO_SHEET.get(code or "", "ungrouped")
         groups.setdefault(sheet_name, []).append(row)
     return {name: pd.DataFrame(rows) for name, rows in groups.items()}

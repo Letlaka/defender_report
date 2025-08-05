@@ -1,4 +1,5 @@
 # utils.py
+from __future__ import annotations
 
 import itertools
 import logging
@@ -195,19 +196,22 @@ def make_datetime_columns_timezone_naive(df: pd.DataFrame) -> pd.DataFrame:
     Convert any timezone-aware datetime columns in a DataFrame to timezone-naive.
     This is required for Excel export (Excel does not support tz-aware datetimes).
     """
+    assert isinstance(df, pd.DataFrame), f"Expected DataFrame, got {type(df)}"
+
     for col in df.columns:
-        if pd.api.types.is_datetime64_any_dtype(df[col]):
-            if hasattr(df[col].dt, "tz") and df[col].dt.tz is not None:
-                df[col] = df[col].dt.tz_localize(None)
-        elif (
-            df[col]
-            .apply(lambda x: isinstance(x, datetime.datetime) and x.tzinfo is not None)
-            .any()
-        ):
-            # For object columns with tz-aware Python datetimes
-            df[col] = df[col].apply(
-                lambda x: x.replace(tzinfo=None)
-                if isinstance(x, datetime.datetime) and x.tzinfo
-                else x
-            )
+        series = df[col]
+        if pd.api.types.is_datetime64_any_dtype(series):
+            # Check if it's tz-aware
+            if getattr(series.dt, "tz", None) is not None:
+                df[col] = series.dt.tz_localize(None)
+        elif series.dtype == "object":
+            # Object columns may contain Python datetime with tzinfo
+            if series.apply(
+                lambda x: isinstance(x, datetime.datetime) and x.tzinfo is not None
+            ).any():
+                df[col] = series.apply(
+                    lambda x: x.replace(tzinfo=None)
+                    if isinstance(x, datetime.datetime) and x.tzinfo
+                    else x
+                )
     return df

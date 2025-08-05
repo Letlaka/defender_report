@@ -60,8 +60,7 @@ def tally_dataframe(data_frame: pd.DataFrame) -> Dict[str, float]:
     managed_by = data_frame.get("_ManagedBy", pd.Series()).fillna("").str.lower().str.strip()
     co_managed = int(managed_by.str.contains("co-managed|comanaged").sum())
     intune_only = int(managed_by.str.contains("intune").sum())
-    inactive_av_clients = int((managed_by == "").sum())
-    sccm_managed = device_count - co_managed - intune_only - inactive_av_clients
+    sccm_managed = device_count - co_managed - intune_only
 
     up_to_date = int((data_frame["Status"] == "UpToDate")[valid_mask].sum())
     out_of_date = int((data_frame["Status"] == "OutOfDate")[valid_mask].sum())
@@ -72,7 +71,6 @@ def tally_dataframe(data_frame: pd.DataFrame) -> Dict[str, float]:
         "Co-managed": co_managed,
         "Intune": intune_only,
         "SCCM Managed": sccm_managed,
-        "inactive_av_clients": inactive_av_clients,
         "Up to Date": up_to_date,
         "Out of Date": out_of_date,
         "Compliance": compliance_rate,
