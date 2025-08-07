@@ -35,10 +35,15 @@ VARIANT_TO_CODE: Dict[str, str] = {
     "(DLTC)": "GPDRT",
     "(GFLEET)": "GPDRT",
     "(GPDTR)": "GPDRT",
+    "(GPDTR)": "GPDRT",
     "(GPDRT": "GPDRT",
     "(GPDRT))": "GPDRT",
     "(GPDRT-K)": "GPDRT",
-
+    "(GPDRT- K)": "GPDRT",
+    "(GPDRT-K)": "GPDRT",
+    "(GPDRT": "GPDRT",
+    "(DLTC)": "GPDRT",
+    
     # GPHEALTH Variants
     "gp health": "GPHEALTH",
     "(GPHEALTH))": "GPHEALTH",
@@ -57,16 +62,13 @@ VARIANT_TO_CODE: Dict[str, str] = {
     "(GPHEALH)": "GPHEALTH",
     "(GPGEALTH)": "GPHEALTH",
     "(gphiealth)": "GPHEALTH",
-
     # GPEGOV Variants
     "egov": "GPEGOV",
     "EGOV": "GPEGOV",
-
     # GPDID Variants
     "DID": "GPDID",
     "(DID))": "GPDID",
     "(GDID)": "GPDID",
-
     # GPEDU Variants
     "GPEDU)": "GPEDU",
     "(GPEDU))": "GPEDU",
@@ -78,34 +80,27 @@ VARIANT_TO_CODE: Dict[str, str] = {
     "(GPED)": "GPEDU",
     "(MC)": "GPEDU",
     "(PEDU)": "GPEDU",
-
     # GDARD Variants
     "(GDACE)": "GDARD",
     "(GDARDE)": "GDARD",
     "(GDARD": "GDARD",
     "(GDEnv)": "GDARD",
-
     # GPGDED Variants
     "(GPDED)": "GPGDED",
     "(GPGDED": "GPGDED",
     "GPGDED": "GPGDED",
-
     # GPDPR Variants
     "(GPRPR)": "GPDPR",
     "GPDPR)": "GPDPR",
     "(GPDPDR)": "GPDPR",
-
     # GDHUS Variants
     "(GDHuS": "GDHUS",
     "(GDHS)": "GDHUS",
-
     # GPSAS Variants
     "GPSAS)": "GPSAS",
     "(GPSAS))": "GPSAS",
-
     # GPSPORTS Variants
     "(GPsport)": "GPSPORTS",
-
     # GIFA
     "gifa": "GIFA",
 }

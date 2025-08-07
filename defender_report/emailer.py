@@ -1,15 +1,17 @@
 # emailer.py
+import mimetypes
 import os
 import smtplib
-import mimetypes
 from email.message import EmailMessage
 from typing import List, Optional, Union
+
 
 def send_email(
     smtp_server: str,
     smtp_port: int,
     from_addr: str,
     to_addrs: Union[str, List[str]],
+    cc_addrs: Union[str, List[str]],
     subject: str,
     body: str,
     attachments: Optional[List[str]] = None,
@@ -39,9 +41,17 @@ def send_email(
     if isinstance(to_addrs, str):
         to_addrs = [addr.strip() for addr in to_addrs.split(",") if addr.strip()]
     msg["To"] = ", ".join(to_addrs)
+
+    if cc_addrs:
+        if isinstance(cc_addrs, str):
+            cc_addrs = [addr.strip() for addr in cc_addrs.split(",") if addr.strip()]
+        msg["Cc"] = ", ".join(cc_addrs)
+    else:
+        cc_addrs = []
+
+    all_recipients = to_addrs + cc_addrs
     msg.set_content(body)
 
-    # Attach any files
     if attachments:
         for file_path in attachments:
             try:
@@ -65,7 +75,7 @@ def send_email(
                 server.starttls()
                 server.ehlo()
                 server.login(smtp_user, smtp_password)
-            server.send_message(msg)
+            server.send_message(msg, to_addrs=all_recipients)
     except Exception as exc:
         raise RuntimeError(
             f"Failed to send email to {to_addrs} via {smtp_server}:{smtp_port}: {exc}"

@@ -134,7 +134,11 @@ def parse_command_line_arguments() -> argparse.Namespace:
     parser.add_argument("--smtp-user", default=os.getenv("SMTP_USER"))
     parser.add_argument("--smtp-password", default=os.getenv("SMTP_PASSWORD"))
     parser.add_argument("--from-email", default=os.getenv("FROM_EMAIL"))
-
+    parser.add_argument(
+        "--cc-email",
+        help="CC recipient(s), comma-separated if more than one",
+        default=os.getenv("CC_EMAIL"),
+    )
     # Debug & runtime behavior
     parser.add_argument("--log-file", default=None, help="Optional log file path")
     parser.add_argument(
@@ -379,6 +383,7 @@ def main() -> None:
                         smtp_port=args.smtp_port,
                         from_addr=args.from_email,
                         to_addrs=recipients,
+                        cc_addrs=args.cc_email,
                         subject=subject,
                         body=body,
                         attachments=[report_path],
