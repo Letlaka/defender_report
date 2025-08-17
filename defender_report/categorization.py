@@ -3,6 +3,7 @@ from typing import Dict
 
 import pandas as pd
 
+
 def categorize_dataframe(
     data_frame: pd.DataFrame,
     reference_date: datetime.date,
@@ -18,6 +19,9 @@ def categorize_dataframe(
     """
     cutoff_date = reference_date - datetime.timedelta(days=threshold_days)
     df = data_frame.copy()
+    # Parse LastReportedDateTime safely
+    if "LastReportedDateTime" not in df.columns:
+        df["LastReportedDateTime"] = pd.NaT
     df["LastReportedDateTime"] = pd.to_datetime(df.get("LastReportedDateTime", ""), errors="coerce")
 
     def assess_row(row):
@@ -46,7 +50,7 @@ def categorize_dataframe(
 
     assess_results = df.apply(assess_row, axis=1, result_type="expand")
     for col in ["Status", "ComplianceLevel", "ComplianceSeverity", "ComplianceReason"]:
-        df[col] = assess_results[col]
+        df.loc[:, col] = assess_results[col]
     return df
 
 def tally_dataframe(data_frame: pd.DataFrame) -> Dict[str, float]:
@@ -54,16 +58,22 @@ def tally_dataframe(data_frame: pd.DataFrame) -> Dict[str, float]:
     Count devices by management type and freshness, returning counts
     plus a "Compliance" fraction between 0.0 and 1.0.
     """
-    valid_mask = data_frame["DeviceName"].astype(str).str.strip() != ""
+    df = data_frame.copy()
+
+    for col in ["DeviceName", "_ManagedBy", "Status"]:
+        if col not in df.columns:
+            df[col] = ""
+
+    valid_mask = df["DeviceName"].astype(str).str.strip() != ""
     device_count = int(valid_mask.sum())
 
-    managed_by = data_frame.get("_ManagedBy", pd.Series()).fillna("").str.lower().str.strip()
-    co_managed = int(managed_by.str.contains("co-managed|comanaged").sum())
-    intune_only = int(managed_by.str.contains("intune").sum())
+    managed_by = df["_ManagedBy"].astype(str).fillna("").str.lower().str.strip()
+    co_managed = int(managed_by[valid_mask].str.contains("co-managed|comanaged").sum())
+    intune_only = int(managed_by[valid_mask].str.contains("intune").sum())
     sccm_managed = device_count - co_managed - intune_only
 
-    up_to_date = int((data_frame["Status"] == "UpToDate")[valid_mask].sum())
-    out_of_date = int((data_frame["Status"] == "OutOfDate")[valid_mask].sum())
+    up_to_date = int((df["Status"] == "UpToDate")[valid_mask].sum())
+    out_of_date = int((df["Status"] == "OutOfDate")[valid_mask].sum())
     compliance_rate = (up_to_date / device_count) if device_count else 0.0
 
     return {

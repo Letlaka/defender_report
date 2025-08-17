@@ -10,7 +10,7 @@ import os
 import pathlib
 import shutil
 import sys
-from typing import Dict, List
+from typing import Dict, List, Optional
 import json
 
 from defender_report.emailer import send_email
@@ -18,7 +18,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from defender_report.categorization import categorize_dataframe, tally_dataframe
-from defender_report.grouping import group_rows_by_department, load_sheet_order
+from defender_report.grouping import group_rows_by_device_prefix, load_sheet_order
 from defender_report.reporting import write_department_reports, write_full_report
 from defender_report.utils import Spinner, configure_logging
 
@@ -56,112 +56,137 @@ DISPLAY_MAP = {
     "ungrouped": "ungrouped",
 }
 
+class CustomFormatter(
+    argparse.ArgumentDefaultsHelpFormatter, argparse.RawTextHelpFormatter
+):
+    pass
 
-def parse_command_line_arguments() -> argparse.Namespace:
-    """Define and parse all CLI arguments."""
-    today_str = datetime.date.today().isoformat()
-    parser = argparse.ArgumentParser(__doc__)
+def parse_command_line_arguments():
+    parser = argparse.ArgumentParser(
+        description="Command-line entry point for the DefenderAgents report generator.",
+        formatter_class=CustomFormatter,
+    )
 
     # Core I/O
-    parser.add_argument(
-        "--input-path", default=os.path.join(os.getcwd(), "DefenderAgents.xlsx")
+    core = parser.add_argument_group("Core I/O")
+    core.add_argument(
+        "--input-path",
+        default="DefenderAgents.xlsx",
+        help="Path to input Excel file with Defender agent data.",
     )
-    parser.add_argument("--template-path", default=resource_path("AVReport.xlsx"))
-
-    parser.add_argument(
-        "--output-path", default=os.path.join(os.getcwd(), "DefenderAgents_Report.xlsx")
+    core.add_argument(
+        "--template-path",
+        default="AVReport.xlsx",
+        help="Path to Excel template for sheet order.",
+    )
+    core.add_argument(
+        "--output-path",
+        default="DefenderAgents_Report.xlsx",
+        help="Path for the generated master report Excel file.",
     )
 
     # AD enrichment
-    parser.add_argument(
-        "--enrich-ad", action="store_true", help="Enable AD enrichment (if available)"
+    enrich = parser.add_argument_group("AD enrichment")
+    enrich.add_argument(
+        "--enrich-ad",
+        action="store_true",
+        help="Enable Active Directory enrichment if available.",
     )
-    parser.add_argument(
-        "--use-cache", action="store_true", help="Use cached AD results if available"
+    enrich.add_argument(
+        "--use-cache",
+        action="store_true",
+        help="Use cached AD enrichment results if available.",
     )
-    parser.add_argument(
+    enrich.add_argument(
         "--clear-cache",
         action="store_true",
-        help="Clear cached AD results before querying",
+        help="Clear cached AD enrichment results before querying.",
     )
-    parser.add_argument(
+    enrich.add_argument(
         "--export-unmatched-dir",
         type=str,
-        help="Directory to save unmatched_devices.(csv|json)",
+        help="Directory to save unmatched devices as CSV or JSON.",
     )
 
     # Processing options
-    parser.add_argument(
+    processing = parser.add_argument_group("Processing options")
+    processing.add_argument(
         "--date",
-        default=today_str,
-        help="Reference date for compliance checks (YYYY-MM-DD)",
+        default=datetime.date.today().isoformat(),
+        help="Reference date for compliance checks (YYYY-MM-DD).",
     )
-    parser.add_argument(
+    processing.add_argument(
         "--threshold-days",
         type=int,
         default=7,
-        help="Days since last seen before 'Out of Date'",
+        help="Number of days since last seen before marking device as 'Out of Date'.",
     )
-    parser.add_argument(
+    processing.add_argument(
         "--department",
         nargs="+",
         metavar="DEPT",
-        help="Filter to specific department(s)",
+        help="Filter to specific department code(s) (space-separated).",
     )
-    parser.add_argument(
+    processing.add_argument(
         "--master-only",
         action="store_true",
-        help="Only generate the master summary report",
+        help="Only generate the master summary report (skip per-department reports).",
     )
 
     # Emailing
-    parser.add_argument(
+    emailing = parser.add_argument_group("Emailing")
+    emailing.add_argument(
         "--no-emails",
         dest="send_emails",
         action="store_false",
-        help="Disable email sending",
+        help="Disable email sending after report generation.",
     )
     parser.set_defaults(send_emails=True)
-    parser.add_argument(
+    emailing.add_argument(
         "--emails-config",
-        default=default_map,
-        help="JSON file mapping department to emails",
+        default="emails_config.json",
+        help="Path to JSON file mapping department codes to email recipients.",
     )
-    parser.add_argument("--smtp-server", default=os.getenv("SMTP_SERVER"))
-    parser.add_argument(
-        "--smtp-port", type=int, default=int(os.getenv("SMTP_PORT", 587))
+    emailing.add_argument(
+        "--smtp-server", default=None, help="SMTP server hostname for sending emails."
     )
-    parser.add_argument("--smtp-user", default=os.getenv("SMTP_USER"))
-    parser.add_argument("--smtp-password", default=os.getenv("SMTP_PASSWORD"))
-    parser.add_argument("--from-email", default=os.getenv("FROM_EMAIL"))
-    parser.add_argument(
-        "--cc-email",
-        help="CC recipient(s), comma-separated if more than one",
-        default=os.getenv("CC_EMAIL"),
+    emailing.add_argument(
+        "--smtp-port", type=int, default=587, help="SMTP server port."
     )
+    emailing.add_argument("--smtp-user", default=None, help="SMTP username.")
+    emailing.add_argument("--smtp-password", default=None, help="SMTP password.")
+    emailing.add_argument("--from-email", default=None, help="Sender email address.")
+    emailing.add_argument(
+        "--cc-email", default=None, help="CC recipient(s) for emails, comma-separated."
+    )
+
     # Debug & runtime behavior
-    parser.add_argument("--log-file", default=None, help="Optional log file path")
-    parser.add_argument(
+    debug = parser.add_argument_group("Debug & runtime behavior")
+    debug.add_argument(
+        "--log-file",
+        default=None,
+        help="Optional path for log file (default: log only to console).",
+    )
+    debug.add_argument(
         "--dry-run",
         action="store_true",
-        help="Run without writing reports or sending emails",
+        help="Run without writing reports or sending emails (for testing/debug).",
     )
-    parser.add_argument(
-        "--verbose", action="store_true", help="Enable verbose debug logging"
+    debug.add_argument(
+        "--verbose", action="store_true", help="Enable verbose debug logging."
     )
-    parser.add_argument(
+    debug.add_argument(
         "--resource-root",
         type=str,
-        help="Override static resource directory (.env, template)",
+        help="Override directory for static resources like .env and template.",
     )
-    parser.add_argument(
+    debug.add_argument(
         "--open-output",
         action="store_true",
-        help="Open report folder when done (Windows only)",
+        help="Open the report folder after completion (Windows only).",
     )
 
     return parser.parse_args()
-
 
 def main() -> None:
     args = parse_command_line_arguments()
@@ -178,15 +203,42 @@ def main() -> None:
     if not os.path.isfile(args.input_path):
         logger.error("Input not found: %s", args.input_path)
         sys.exit(1)
+
     with Spinner("Reading DefenderAgents.xlsx"):
         data_frame = pd.read_excel(args.input_path)
     logger.info("Loaded %d rows from %s", len(data_frame), args.input_path)
-    if "UserName" not in data_frame.columns:
-        logger.error("Input must contain 'UserName' column")
+
+    # Remove rows with missing or blank UserName/DeviceName
+    if "UserName" in data_frame.columns and "DeviceName" in data_frame.columns:
+        before_count = len(data_frame)
+
+        data_frame = data_frame.dropna(subset=["UserName", "DeviceName"], how="all")
+        
+        data_frame = data_frame[
+            (data_frame["DeviceName"].astype(str).str.strip() != "") |
+            (data_frame["UserName"].astype(str).str.strip() != "")
+        ]
+
+        logger.info(
+            "Filtered out %d rows where BOTH DeviceName and UserName were empty",
+            before_count - len(data_frame),
+        )
+    else:
+        logger.error("'DeviceName' or 'UserName' column is missing from input data.")
         sys.exit(1)
 
+
+    logger.info("Loaded %d valid rows from %s", len(data_frame), args.input_path)
+
+
+    if "UserName" not in data_frame.columns:
+        logger.warning(
+            "Input does not contain 'UserName' column. Device-based grouping will be used exclusively."
+        )
+
     # Group by department and load template order
-    grouped_sheets = group_rows_by_department(data_frame)
+    grouped_sheets = group_rows_by_device_prefix(data_frame)
+
     sheet_order = load_sheet_order(args.template_path)
 
     # Handle department filtering
@@ -206,8 +258,19 @@ def main() -> None:
         logger.info("Limiting report to department(s): %s", args.department)
         sheet_order = list(args.department)
 
+    # Resolve which departments we will process
+    if args.department:
+        departments = list(args.department)
+    else:
+        departments = list(sheet_order)
+        if "ungrouped" not in departments:
+            departments.append("ungrouped")
+
     # Per-department logic
-    all_sheets: Dict[str, pd.DataFrame] = {}
+    all_sheets: Dict[str, pd.DataFrame] = {
+        dept: grouped_sheets.get(dept, pd.DataFrame(columns=data_frame.columns))
+        for dept in departments
+    }
     summary_rows: List[dict] = []
 
     if args.department:

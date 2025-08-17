@@ -2,12 +2,17 @@ import datetime
 import logging
 import os
 from typing import Dict, List, Tuple, cast
-from xlsxwriter.workbook import Workbook
 
 import pandas as pd
 from tqdm import tqdm
+from xlsxwriter.workbook import Workbook
 
 from defender_report.utils import make_datetime_columns_timezone_naive
+from defender_report.definitions import (
+    build_definition_summary,
+    write_definition_summary_sheet,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -73,39 +78,45 @@ def _write_summary_table(
     report_date: datetime.date,
 ) -> None:
     """Write the summary sheet (always styled, always fixed columns)."""
-    workbook:Workbook = writer.book  # type: ignore
+    workbook: Workbook = writer.book  # type: ignore
     worksheet = workbook.add_worksheet(sheet_name)
     writer.sheets[sheet_name] = worksheet
 
     # Formats
-    date_fmt = workbook.add_format({
-        "bold": True,
-        "align": "center",
-        "font_size": 14,
-        "bg_color": "#4F81BD",
-        "font_color": "#000000",
-    })
-    header_fmt = workbook.add_format({
-        "bold": True,
-        "align": "center",
-        "valign": "vcenter",
-        "font_color": "#FFFFFF",
-        "bg_color": "#16365C",
-        "border": 1,
-    })
+    date_fmt = workbook.add_format(
+        {
+            "bold": True,
+            "align": "center",
+            "font_size": 14,
+            "bg_color": "#4F81BD",
+            "font_color": "#000000",
+        }
+    )
+    header_fmt = workbook.add_format(
+        {
+            "bold": True,
+            "align": "center",
+            "valign": "vcenter",
+            "font_color": "#FFFFFF",
+            "bg_color": "#16365C",
+            "border": 1,
+        }
+    )
     cell_fmt = workbook.add_format({"border": 1, "align": "center"})
-    green_fmt = workbook.add_format({
-        "bg_color": "#00b050", "num_format": "0.0%", "border": 1, "align": "center"
-    })
-    yellow_fmt = workbook.add_format({
-        "bg_color": "#ffff00", "num_format": "0.0%", "border": 1, "align": "center"
-    })
-    red_fmt = workbook.add_format({
-        "bg_color": "#ff0000", "num_format": "0.0%", "border": 1, "align": "center"
-    })
+    green_fmt = workbook.add_format(
+        {"bg_color": "#00b050", "num_format": "0.0%", "border": 1, "align": "center"}
+    )
+    yellow_fmt = workbook.add_format(
+        {"bg_color": "#ffff00", "num_format": "0.0%", "border": 1, "align": "center"}
+    )
+    red_fmt = workbook.add_format(
+        {"bg_color": "#ff0000", "num_format": "0.0%", "border": 1, "align": "center"}
+    )
 
     col_count = len(summary_dataframe.columns)
-    worksheet.merge_range(0, 0, 0, col_count - 1, report_date.strftime("%d-%b"), date_fmt)
+    worksheet.merge_range(
+        0, 0, 0, col_count - 1, report_date.strftime("%d-%b"), date_fmt
+    )
 
     for col_idx, col in enumerate(summary_dataframe.columns):
         worksheet.write(1, col_idx, col, header_fmt)
@@ -158,6 +169,7 @@ def write_full_report(
     """
     Write the master Excel report.
     Only exports the *essential* columns in each department sheet.
+    Adds a 'Definition Summary' sheet with pie chart for all devices.
     """
     # Department display names
     display_map = {
@@ -181,7 +193,6 @@ def write_full_report(
     if include_ungrouped and "ungrouped" not in sheet_order:
         sheet_order = sheet_order + ["ungrouped"]
 
-    # Only export the minimum columns for master (no advanced forensic/AD fields)
     essential_cols = [
         "DeviceName",
         "UserName",
@@ -199,23 +210,40 @@ def write_full_report(
     report_date = datetime.date.today()
     logger.info("Starting master report: %s", output_path)
 
-    with pd.ExcelWriter(output_path, engine="xlsxwriter", datetime_format="yyyy-mm-dd") as writer:
+    with pd.ExcelWriter(
+        output_path, engine="xlsxwriter", datetime_format="yyyy-mm-dd"
+    ) as writer:
+        # Write each department sheet
         for dept_code in tqdm(sheet_order, desc="Master sheets", unit="sheet"):
             df = all_sheets.get(dept_code, pd.DataFrame())
             if not df.empty:
-                cols_present: List[str] = [c for c in essential_cols if c in df.columns]
-                extra_cols: List[str] = [c for c in df.columns if c not in cols_present]
-                all_cols: List[str] = cols_present + extra_cols
+                cols_present = [c for c in essential_cols if c in df.columns]
+                extra_cols = [c for c in df.columns if c not in cols_present]
+                all_cols = cols_present + extra_cols
                 df_export = cast(pd.DataFrame, df.loc[:, all_cols])
                 df_export = make_datetime_columns_timezone_naive(df_export)
                 sheet_name = display_map.get(dept_code, dept_code)
                 _write_table(writer, df_export, sheet_name)
             else:
-                ws = writer.book.add_worksheet(display_map.get(dept_code, dept_code)) # type: ignore
+                ws = writer.book.add_worksheet(display_map.get(dept_code, dept_code))  # type: ignore
                 ws.write(0, 0, "No data for this department.")
                 writer.sheets[display_map.get(dept_code, dept_code)] = ws
 
+        # Summary sheet
         _write_summary_table(writer, summary_df, "Summary", report_date)
+
+        # Definition Summary for ALL devices
+        frames = [df for df in all_sheets.values() if not df.empty]
+        all_devices_df = (
+            pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        )
+        def_summary_df = build_definition_summary(all_devices_df, report_date)
+        write_definition_summary_sheet(
+            writer,
+            def_summary_df,
+            sheet_name="Definition Summary",
+            chart_title="Definition status on computers (All Devices)",
+        )
 
     logger.info("Master report written to %s", output_path)
 
@@ -229,12 +257,8 @@ def write_department_reports(
 ) -> List[Tuple[str, str]]:
     """
     Generate one workbook per department (full details).
-    The 'Summary' sheet always uses columns A–H, with only the header and that department's row,
-    and the compliance cell color-coded as per the legend.
-    Returns a list of (department_code, path_to_file).
+    Adds a 'Definition Summary' sheet with pie chart for that department only.
     """
-    from defender_report.utils import make_datetime_columns_timezone_naive
-
     report_date = datetime.date.today()
     depts = list(sheet_order)
     if include_ungrouped and "ungrouped" not in depts:
@@ -267,6 +291,7 @@ def write_department_reports(
         "gpsports": "SPORTS",
         "gpdrt": "TRANSPORT",
         "gpt": "TREASURY",
+        "ungrouped": "ungrouped",
     }
 
     logger.info("Writing %d department reports to %s", len(depts), output_root)
@@ -277,86 +302,82 @@ def write_department_reports(
         filename = f"{dept}_Report_{report_date.isoformat()}.xlsx"
         full_path = os.path.join(target, filename)
 
-        with pd.ExcelWriter(full_path, engine="xlsxwriter", datetime_format="yyyy-mm-dd") as writer:
-            # Per-department: export all columns
+        with pd.ExcelWriter(
+            full_path, engine="xlsxwriter", datetime_format="yyyy-mm-dd"
+        ) as writer:
+            # Department data
             dept_data = all_sheets.get(dept, pd.DataFrame())
             if not dept_data.empty:
                 dept_data = make_datetime_columns_timezone_naive(dept_data)
                 _write_table(writer, dept_data, dept)
             else:
-                worksheet = writer.book.add_worksheet(dept) # type: ignore
+                worksheet = writer.book.add_worksheet(dept)  # type: ignore
                 worksheet.write(0, 0, "No data for this department.")
                 writer.sheets[dept] = worksheet
 
-            # Stylized summary for this department
-            worksheet = writer.book.add_worksheet("Summary") # type: ignore
+            # Summary sheet styling
+            worksheet = writer.book.add_worksheet("Summary")  # type: ignore
             writer.sheets["Summary"] = worksheet
 
-            # --- Formats ---
-            date_fmt = writer.book.add_format({ # type: ignore
-                "bold": True,
-                "align": "center",
-                "font_size": 14,
-                "bg_color": "#C9DAF8",
-                "border": 1,
-            })
-            header_fmt = writer.book.add_format({ # type: ignore
-                "bold": True,
-                "align": "center",
-                "valign": "vcenter",
-                "font_color": "#FFFFFF",
-                "bg_color": "#4F81BD",
-                "border": 1,
-            })# Safely resolve department summary row using both display name and fallback
-            dept_summary_row = pd.DataFrame()
-            if "Department" in summary_dataframe.columns:
-                display_name = display_map.get(dept, dept)
-                dept_summary_row = summary_dataframe[
-                    summary_dataframe["Department"] == display_name
-                ]
-                if dept_summary_row.empty:
-                    dept_summary_row = summary_dataframe[
-                        summary_dataframe["Department"] == dept
-                    ]
-            else:
-                logger.warning("Missing 'Department' column in summary_dataframe — skipping summary for '%s'", dept)
+            date_fmt = writer.book.add_format(
+                {
+                    "bold": True,
+                    "align": "center",
+                    "font_size": 14,
+                    "bg_color": "#C9DAF8",
+                    "border": 1,
+                }
+            )  # type: ignore
+            header_fmt = writer.book.add_format(
+                {
+                    "bold": True,
+                    "align": "center",
+                    "valign": "vcenter",
+                    "font_color": "#FFFFFF",
+                    "bg_color": "#4F81BD",
+                    "border": 1,
+                }
+            )  # type: ignore
+            normal_fmt = writer.book.add_format(
+                {"align": "center", "valign": "vcenter", "border": 1}
+            )  # type: ignore
+            green_fmt = writer.book.add_format(
+                {
+                    "bg_color": "#00b050",
+                    "align": "center",
+                    "valign": "vcenter",
+                    "border": 1,
+                    "num_format": "0.0%",
+                    "bold": True,
+                }
+            )  # type: ignore
+            yellow_fmt = writer.book.add_format(
+                {
+                    "bg_color": "#ffff00",
+                    "align": "center",
+                    "valign": "vcenter",
+                    "border": 1,
+                    "num_format": "0.0%",
+                    "bold": True,
+                }
+            )  # type: ignore
+            red_fmt = writer.book.add_format(
+                {
+                    "bg_color": "#ff0000",
+                    "align": "center",
+                    "valign": "vcenter",
+                    "border": 1,
+                    "num_format": "0.0%",
+                    "bold": True,
+                }
+            )  # type: ignore
 
-            normal_fmt = writer.book.add_format({ # type: ignore
-                "align": "center",
-                "valign": "vcenter",
-                "border": 1,
-            })
-            green_fmt = writer.book.add_format({ # type: ignore
-                "bg_color": "#00b050",
-                "align": "center",
-                "valign": "vcenter",
-                "border": 1,
-                "num_format": "0.0%",
-                "bold": True,
-            })
-            yellow_fmt = writer.book.add_format({ # type: ignore
-                "bg_color": "#ffff00",
-                "align": "center",
-                "valign": "vcenter",
-                "border": 1,
-                "num_format": "0.0%",
-                "bold": True,
-            })
-            red_fmt = writer.book.add_format({ # type: ignore
-                "bg_color": "#ff0000",
-                "align": "center",
-                "valign": "vcenter",
-                "border": 1,
-                "num_format": "0.0%",
-                "bold": True,
-            })
-
-            worksheet.merge_range(0, 0, 0, col_count - 1, report_date.strftime("%d-%b"), date_fmt)
+            worksheet.merge_range(
+                0, 0, 0, col_count - 1, report_date.strftime("%d-%b"), date_fmt
+            )
             for col_idx, col_name in enumerate(summary_columns):
                 worksheet.write(1, col_idx, col_name, header_fmt)
 
-            # Find the summary row for this department and write it (A3:H3)
-            # Safely resolve department summary row using both display name and fallback
             dept_summary_row = pd.DataFrame()
             if "Department" in summary_dataframe.columns:
                 display_name = display_map.get(dept, dept)
@@ -367,25 +388,23 @@ def write_department_reports(
                     dept_summary_row = summary_dataframe[
                         summary_dataframe["Department"] == dept
                     ]
-            else:
-                logger.warning("Missing 'Department' column in summary_dataframe — skipping summary for '%s'", dept)
 
             if not dept_summary_row.empty:
                 row_vals = [
-                    dept_summary_row[col].iloc[0] if col in dept_summary_row.columns else ""
+                    dept_summary_row[col].iloc[0]
+                    if col in dept_summary_row.columns
+                    else ""
                     for col in summary_columns
                 ]
-                for col_idx, (col_name, value) in enumerate(zip(summary_columns, row_vals)):
+                for col_idx, (col_name, value) in enumerate(
+                    zip(summary_columns, row_vals)
+                ):
                     if col_name.lower() == "compliance":
-                        try:
-                            compliance_val = value
-                        except Exception:
-                            compliance_val = None
-                        if compliance_val is not None and compliance_val >= 0.8: # type: ignore
+                        if value is not None and value >= 0.8:
                             fmt = green_fmt
-                        elif compliance_val is not None and 0.7 < compliance_val < 0.8: # type: ignore
+                        elif value is not None and 0.7 < value < 0.8:
                             fmt = yellow_fmt
-                        elif compliance_val is not None and compliance_val <= 0.7: # type: ignore
+                        elif value is not None and value <= 0.7:
                             fmt = red_fmt
                         else:
                             fmt = normal_fmt
@@ -413,8 +432,17 @@ def write_department_reports(
                 props = {"bold": True, "align": "left"}
                 if color:
                     props["bg_color"] = color
-                fmt = writer.book.add_format(props) # type: ignore
+                fmt = writer.book.add_format(props)  # type: ignore
                 worksheet.write(row0 + i, 0, text, fmt)
+
+            # Definition Summary for this department only
+            def_summary_df = build_definition_summary(dept_data, report_date)
+            write_definition_summary_sheet(
+                writer,
+                def_summary_df,
+                sheet_name="Definition Summary",
+                chart_title=f"Definition status on computers ({dept})",
+            )
 
         summaries.append((dept, full_path))
 

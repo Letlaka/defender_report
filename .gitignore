@@ -37,3 +37,4 @@ DefenderReportGenerator.spec
 unmatched_devices.csv
 unmatched_devices.json
 
+defender_report.log
