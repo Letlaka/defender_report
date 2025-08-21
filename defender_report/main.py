@@ -5,19 +5,20 @@ Command-line entry point for the DefenderAgents report generator.
 
 import argparse
 import datetime
+import json
 import logging
 import os
+import re
 import pathlib
 import shutil
 import sys
-from typing import Dict, List, Optional
-import json
+from typing import Dict, List
 
-from defender_report.emailer import send_email
 import pandas as pd
 from dotenv import load_dotenv
 
 from defender_report.categorization import categorize_dataframe, tally_dataframe
+from defender_report.emailer import send_email
 from defender_report.grouping import group_rows_by_device_prefix, load_sheet_order
 from defender_report.reporting import write_department_reports, write_full_report
 from defender_report.utils import Spinner, configure_logging
@@ -32,8 +33,24 @@ def resource_path(relative_path: str) -> str:
     return os.path.join(base, relative_path)
 
 
-env_path = resource_path(".env")
-load_dotenv(env_path)
+def load_env():
+    # 1) .env next to the EXE, 2) CWD .env, 3) bundled .env
+    candidates = []
+    if getattr(sys, "frozen", False):
+        candidates.append(os.path.join(os.path.dirname(sys.executable), ".env"))
+    candidates += [
+        os.path.join(os.getcwd(), ".env"),
+        resource_path(".env"),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            load_dotenv(p, override=True)
+            logger.info("Loaded .env from %s", p)
+            return
+    logger.warning(".env not found; relying on process env only.")
+
+
+load_env()
 
 BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
 default_map = os.getenv("EMAILS_CONFIG", resource_path("emails_config.json"))
@@ -56,10 +73,12 @@ DISPLAY_MAP = {
     "ungrouped": "ungrouped",
 }
 
+
 class CustomFormatter(
     argparse.ArgumentDefaultsHelpFormatter, argparse.RawTextHelpFormatter
 ):
     pass
+
 
 def parse_command_line_arguments():
     parser = argparse.ArgumentParser(
@@ -136,28 +155,55 @@ def parse_command_line_arguments():
     # Emailing
     emailing = parser.add_argument_group("Emailing")
     emailing.add_argument(
+        "--emails-config",
+        default=os.getenv("EMAILS_CONFIG", resource_path("emails_config.json")),
+        help="Path to recipients mapping JSON (dept_code -> [emails]).",
+    )
+    # Mutually exclusive: --send-emails / --no-emails
+    mx = emailing.add_mutually_exclusive_group()
+    mx.add_argument(
+        "--send-emails",
+        action="store_true",
+        default=os.getenv("SEND_EMAILS", "false").lower() in ("1", "true", "yes"),
+        help="Send department emails with attachments.",
+    )
+    mx.add_argument(
         "--no-emails",
         dest="send_emails",
         action="store_false",
-        help="Disable email sending after report generation.",
+        help="Do not send emails (default unless SEND_EMAILS=true).",
     )
-    parser.set_defaults(send_emails=True)
+
     emailing.add_argument(
-        "--emails-config",
-        default="emails_config.json",
-        help="Path to JSON file mapping department codes to email recipients.",
-    )
-    emailing.add_argument(
-        "--smtp-server", default=None, help="SMTP server hostname for sending emails."
+        "--smtp-server",
+        default=os.getenv("SMTP_HOST") or os.getenv("SMTP_SERVER"),
+        help="SMTP server hostname.",
     )
     emailing.add_argument(
-        "--smtp-port", type=int, default=587, help="SMTP server port."
+        "--smtp-port",
+        type=int,
+        default=int(os.getenv("SMTP_PORT", "587")),
+        help="SMTP port (587 for STARTTLS, 25 or 2525 for plain relay).",
     )
-    emailing.add_argument("--smtp-user", default=None, help="SMTP username.")
-    emailing.add_argument("--smtp-password", default=None, help="SMTP password.")
-    emailing.add_argument("--from-email", default=None, help="Sender email address.")
     emailing.add_argument(
-        "--cc-email", default=None, help="CC recipient(s) for emails, comma-separated."
+        "--smtp-user",
+        default=os.getenv("SMTP_USERNAME") or os.getenv("SMTP_USER"),
+        help="SMTP username (optional for relay).",
+    )
+    emailing.add_argument(
+        "--smtp-password",
+        default=os.getenv("SMTP_PASSWORD") or os.getenv("SMTP_PASSWORD"),
+        help="SMTP password (optional for relay).",
+    )
+    emailing.add_argument(
+        "--from-email",
+        default=os.getenv("FROM_ADDRESS") or os.getenv("FROM_EMAIL"),
+        help="From address used when sending emails.",
+    )
+    emailing.add_argument(
+        "--cc-email",
+        default=os.getenv("CC_EMAIL", ""),
+        help="Comma-separated CC list (optional).",
     )
 
     # Debug & runtime behavior
@@ -188,6 +234,7 @@ def parse_command_line_arguments():
 
     return parser.parse_args()
 
+
 def main() -> None:
     args = parse_command_line_arguments()
     configure_logging(log_file_path=args.log_file)
@@ -204,7 +251,7 @@ def main() -> None:
         logger.error("Input not found: %s", args.input_path)
         sys.exit(1)
 
-    with Spinner("Reading DefenderAgents.xlsx"):
+    with Spinner(f"Reading {os.path.basename(args.input_path)}"):
         data_frame = pd.read_excel(args.input_path)
     logger.info("Loaded %d rows from %s", len(data_frame), args.input_path)
 
@@ -213,10 +260,10 @@ def main() -> None:
         before_count = len(data_frame)
 
         data_frame = data_frame.dropna(subset=["UserName", "DeviceName"], how="all")
-        
+
         data_frame = data_frame[
-            (data_frame["DeviceName"].astype(str).str.strip() != "") |
-            (data_frame["UserName"].astype(str).str.strip() != "")
+            (data_frame["DeviceName"].astype(str).str.strip() != "")
+            | (data_frame["UserName"].astype(str).str.strip() != "")
         ]
 
         logger.info(
@@ -227,9 +274,7 @@ def main() -> None:
         logger.error("'DeviceName' or 'UserName' column is missing from input data.")
         sys.exit(1)
 
-
     logger.info("Loaded %d valid rows from %s", len(data_frame), args.input_path)
-
 
     if "UserName" not in data_frame.columns:
         logger.warning(
@@ -238,6 +283,16 @@ def main() -> None:
 
     # Group by department and load template order
     grouped_sheets = group_rows_by_device_prefix(data_frame)
+
+    # Ensure template path resolves for PyInstaller
+    if not os.path.isfile(args.template_path):
+        alt = resource_path(os.path.basename(args.template_path))
+        if os.path.isfile(alt):
+            logger.info("Using bundled template: %s", alt)
+            args.template_path = alt
+        else:
+            logger.error("Template not found: %s", args.template_path)
+            sys.exit(1)
 
     sheet_order = load_sheet_order(args.template_path)
 
@@ -320,7 +375,7 @@ def main() -> None:
         required_columns = {"DeviceName", "_ManagedBy", "LastReportedDateTime"}
         if required_columns.issubset(categorized.columns):
             tally = tally_dataframe(categorized)
-            tally["Department"] = dept_code # type: ignore
+            tally["Department"] = dept_code  # type: ignore
             summary_rows.append(tally)
         else:
             logger.warning("Skipping tally for '%s': missing columns", dept_code)
@@ -342,12 +397,14 @@ def main() -> None:
         col for col in expected_summary_columns if col not in summary_df.columns
     ]
     if missing_columns:
-        logger.warning("Missing expected summary columns: %s", ", ".join(missing_columns))
+        logger.warning(
+            "Missing expected summary columns: %s", ", ".join(missing_columns)
+        )
         for col in missing_columns:
             summary_df[col] = None  # Fill missing ones with None
 
     summary_df = summary_df[expected_summary_columns]
-    summary_df.rename(columns={"Intune": "Intune Managed"}, inplace=True) # type: ignore
+    summary_df.rename(columns={"Intune": "Intune Managed"}, inplace=True)  # type: ignore
 
     if "Department" in summary_df.columns:
         summary_df["Department"] = (
@@ -384,7 +441,7 @@ def main() -> None:
     # Write master and department reports
     write_full_report(
         all_sheets,
-        summary_df, # type: ignore
+        summary_df,  # type: ignore
         master_dept_codes,
         args.output_path,
         include_ungrouped=True,
@@ -400,7 +457,7 @@ def main() -> None:
         dept_summaries = (
             write_department_reports(
                 filtered_all_sheets,
-                filtered_summary_df, # type: ignore
+                filtered_summary_df,  # type: ignore
                 filtered_sheet_order,
                 output_directory,
                 include_ungrouped=(args.department is None),
@@ -411,10 +468,10 @@ def main() -> None:
         logger.info("Skipping individual department reports (--master-only)")
 
     # Email section
+    # Email section
     if args.send_emails:
         try:
-
-            # Ensure path resolution for PyInstaller and fallback if needed
+            # Resolve recipients JSON path (handles PyInstaller bundle)
             config_file = args.emails_config
             if not os.path.isfile(config_file):
                 config_file = resource_path(os.path.basename(config_file))
@@ -422,15 +479,58 @@ def main() -> None:
                 logger.error("Email mapping not found at: %s", args.emails_config)
                 sys.exit(1)
 
-            # Load email recipient config
             with open(config_file, encoding="utf-8") as f:
                 email_map = json.load(f)
 
-            # Send one email per department
+            # Guard SMTP essentials so we don't call SMTP(None, 587)
+            if not args.smtp_server:
+                logger.error(
+                    "SMTP server not set. Use --smtp-server or SMTP_HOST/SMTP_SERVER in .env"
+                )
+                sys.exit(1)
+            if not args.from_email:
+                logger.error(
+                    "From address not set. Use --from-email or FROM_ADDRESS/EMAIL_FROM in .env"
+                )
+                sys.exit(1)
+
+            # Light masking for logs
+            def _mask_user(u: str | None) -> str:
+                if not u:
+                    return ""
+                return (u[:2] + "***") if len(u) > 3 else "***"
+
+            logger.info(
+                "Email config -> host=%s port=%s user=%s from=%s map=%s",
+                args.smtp_server,
+                args.smtp_port,
+                _mask_user(args.smtp_user),
+                args.from_email,
+                config_file,
+            )
+
+            # Normalize dept key for mapping (handles e.g. gpgpedu vs gpedu)
+            def normalize_dept(code: str) -> str:
+                c = code.lower().strip()
+                if c in email_map:
+                    return c
+                # common variant: gpgxxxx -> gpxxxx
+                if c.startswith("gpg") and ("gp" + c[3:]) in email_map:
+                    return "gp" + c[3:]
+                # remove non-letters as last resort
+                c2 = re.sub(r"[^a-z]", "", c)
+                return c2 if c2 in email_map else c
+
+            # Send one email per department report
             for dept_code, report_path in dept_summaries:
-                recipients = email_map.get(dept_code)
+                key = normalize_dept(dept_code)
+                recipients = email_map.get(key)
                 if not recipients:
-                    logger.warning("No recipients for '%s'; skipping email", dept_code)
+                    logger.warning(
+                        "No recipients for '%s' (normalized '%s'); skipping email",
+                        dept_code,
+                        key,
+                    )
                     continue
 
                 subject = f"Microsoft Defender Report for {dept_code} – {reference_date.isoformat()}"
