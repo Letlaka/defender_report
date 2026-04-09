@@ -7,12 +7,11 @@ import pandas as pd
 from tqdm import tqdm
 from xlsxwriter.workbook import Workbook
 
-from defender_report.utils import make_datetime_columns_timezone_naive
 from defender_report.definitions import (
     build_definition_summary,
     write_definition_summary_sheet,
 )
-
+from defender_report.utils import make_datetime_columns_timezone_naive
 
 logger = logging.getLogger(__name__)
 
@@ -187,11 +186,20 @@ def write_full_report(
         "gpsports": "SPORTS",
         "gpdrt": "TRANSPORT",
         "gpt": "TREASURY",
+        "environment": "Environment",
         "ungrouped": "ungrouped",
     }
 
-    if include_ungrouped and "ungrouped" not in sheet_order:
-        sheet_order = sheet_order + ["ungrouped"]
+    # Ensure any dynamically discovered sheets (e.g. newly added depts)
+    # are included after the template order so they are exported.
+    extra_sheets = [s for s in all_sheets.keys() if s not in sheet_order]
+    if (
+        include_ungrouped
+        and "ungrouped" not in extra_sheets
+        and "ungrouped" not in sheet_order
+    ):
+        extra_sheets.append("ungrouped")
+    final_sheet_order = list(sheet_order) + sorted(extra_sheets)
 
     essential_cols = [
         "DeviceName",
@@ -214,7 +222,7 @@ def write_full_report(
         output_path, engine="xlsxwriter", datetime_format="yyyy-mm-dd"
     ) as writer:
         # Write each department sheet
-        for dept_code in tqdm(sheet_order, desc="Master sheets", unit="sheet"):
+        for dept_code in tqdm(final_sheet_order, desc="Master sheets", unit="sheet"):
             df = all_sheets.get(dept_code, pd.DataFrame())
             if not df.empty:
                 cols_present = [c for c in essential_cols if c in df.columns]
@@ -260,9 +268,12 @@ def write_department_reports(
     Adds a 'Definition Summary' sheet with pie chart for that department only.
     """
     report_date = datetime.date.today()
+    # Start with template order, then add any additional discovered sheets
     depts = list(sheet_order)
-    if include_ungrouped and "ungrouped" not in depts:
-        depts.append("ungrouped")
+    extra = [s for s in all_sheets.keys() if s not in depts]
+    if include_ungrouped and "ungrouped" not in extra and "ungrouped" not in depts:
+        extra.append("ungrouped")
+    depts.extend(sorted(extra))
 
     summary_columns = [
         "Department",
@@ -291,6 +302,7 @@ def write_department_reports(
         "gpsports": "SPORTS",
         "gpdrt": "TRANSPORT",
         "gpt": "TREASURY",
+        "environment": "Environment",
         "ungrouped": "ungrouped",
     }
 

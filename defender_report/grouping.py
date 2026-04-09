@@ -28,6 +28,8 @@ DEPARTMENT_CODE_TO_SHEET: Dict[str, str] = {
     "GPSAS": "gpsas",
     "COGTA": "cogta",
     "GIFA": "gifa",
+    "ENV-": "environment",
+    "ENV": "environment",
 }
 
 # -----------------------------------------
@@ -105,6 +107,10 @@ VARIANT_TO_CODE: Dict[str, str] = {
     "(GPsport)": "GPSPORTS",
     # GIFA
     "gifa": "GIFA",
+    # Environment variants
+    "env": "ENV",
+    "environment": "ENV",
+    "(ENV)": "ENV",
 }
 
 # --------------------------------------
@@ -130,6 +136,8 @@ DEVICE_PREFIX_MAP: Dict[str, str] = {
     "ATR": "GPT",
     "COG": "COGTA",
     "GDS": "GDSD",
+    "ENV-": "ENV",
+    "ENV": "ENV",
 }
 # Special case: GDH (but not GDHUS) → GPHEALTH
 _GDH_PATTERN = re.compile(r"^GDH(?!US)")
@@ -156,12 +164,14 @@ _OFFICIAL_CANON: Dict[str, str] = {
     _canon(k): k for k in DEPARTMENT_CODE_TO_SHEET.keys()
 }
 
+
 def _closest_official(cleaned_upper: str, cutoff: float = 0.8) -> Optional[str]:
     """Fuzzy match to nearest official code (handles GPHEATH→GPHEALTH, PGDID→GPDID)."""
     matches = difflib.get_close_matches(
         cleaned_upper, _OFFICIAL_CODES, n=1, cutoff=cutoff
     )
     return matches[0] if matches else None
+
 
 # ------------------------
 # Extraction + normalization
@@ -205,6 +215,7 @@ def _normalize_variant(raw_text: str) -> Optional[str]:
     # fuzzy official
     fuzzy = _closest_official(cleaned_upper)
     return fuzzy
+
 
 def normalize_department_code(raw_text: Optional[str]) -> Optional[str]:
     """Public normalizer wrapper (kept for compatibility)."""

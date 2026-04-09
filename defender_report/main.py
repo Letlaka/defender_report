@@ -8,8 +8,8 @@ import datetime
 import json
 import logging
 import os
-import re
 import pathlib
+import re
 import shutil
 import sys
 from typing import Dict, List
@@ -70,6 +70,7 @@ DISPLAY_MAP = {
     "gpsports": "SPORTS",
     "gpdrt": "TRANSPORT",
     "gpt": "TREASURY",
+    "environment": "Environment",
     "ungrouped": "ungrouped",
 }
 
@@ -252,7 +253,29 @@ def main() -> None:
         sys.exit(1)
 
     with Spinner(f"Reading {os.path.basename(args.input_path)}"):
-        data_frame = pd.read_excel(args.input_path)
+        ext = pathlib.Path(args.input_path).suffix.lower()
+        try:
+            # Prefer openpyxl for modern xlsx files (already declared in pyproject)
+            if ext in (".xlsx", ".xlsm", ".xltx", ".xltm"):
+                data_frame = pd.read_excel(args.input_path, engine="openpyxl")
+            elif ext == ".xls":
+                # .xls requires xlrd; let pandas pick the engine so the original
+                # ImportError is raised if xlrd is missing and we can show a helpful
+                # message below.
+                data_frame = pd.read_excel(args.input_path)
+            else:
+                data_frame = pd.read_excel(args.input_path)
+        except ImportError as e:
+            msg = str(e)
+            if "xlrd" in msg:
+                logger.error(
+                    "Missing dependency 'xlrd' required for .xls files.\n"
+                    "Convert the input to .xlsx (recommended) or install xlrd>=2.0.1 "
+                    "and rebuild the EXE.\nSee: pip install xlrd\n"
+                )
+            else:
+                logger.exception("Failed to read Excel file: %s", e)
+            sys.exit(1)
     logger.info("Loaded %d rows from %s", len(data_frame), args.input_path)
 
     # Remove rows with missing or blank UserName/DeviceName
@@ -421,6 +444,14 @@ def main() -> None:
     if "ungrouped" not in master_dept_codes:
         master_dept_codes.append("ungrouped")
 
+    # Also include any discovered sheets that are not present in the template
+    extra_from_data = [s for s in all_sheets.keys() if s not in master_dept_codes]
+    if extra_from_data:
+        master_dept_codes.extend(sorted(extra_from_data))
+    # Ensure 'environment' specifically is present when discovered
+    if "environment" in all_sheets and "environment" not in master_dept_codes:
+        master_dept_codes.append("environment")
+
     if args.department:
         filtered_sheet_order = list(args.department)
         filtered_all_sheets = {
@@ -481,6 +512,14 @@ def main() -> None:
 
             with open(config_file, encoding="utf-8") as f:
                 email_map = json.load(f)
+                # normalize mapping keys to lower-case so dept codes (e.g. 'gpdid') match
+                email_map = {k.lower(): v for k, v in email_map.items()}
+                # Also map DISPLAY_MAP values back to their department codes
+                # e.g. JSON may use "EDUCATION" but sheet codes are 'gpedu'
+                for dept_code, display_name in DISPLAY_MAP.items():
+                    display_key = display_name.lower()
+                    if display_key in email_map and dept_code not in email_map:
+                        email_map[dept_code] = email_map[display_key]
 
             # Guard SMTP essentials so we don't call SMTP(None, 587)
             if not args.smtp_server:

@@ -19,6 +19,20 @@ def categorize_dataframe(
     """
     cutoff_date = reference_date - datetime.timedelta(days=threshold_days)
     df = data_frame.copy()
+    # If df has no rows, create expected output columns and return early.
+    # This prevents KeyError when apply(..., result_type='expand') produces
+    # an empty DataFrame without the 'Status' column in packaged runs.
+    if df.empty:
+        for col in [
+            "LastReportedDateTime",
+            "Status",
+            "ComplianceLevel",
+            "ComplianceSeverity",
+            "ComplianceReason",
+        ]:
+            if col not in df.columns:
+                df[col] = pd.Series(dtype=object)
+        return df
     # Parse LastReportedDateTime safely
     if "LastReportedDateTime" not in df.columns:
         df["LastReportedDateTime"] = pd.NaT
